@@ -2128,10 +2128,10 @@ module BigNumber
     # Uses a small temp buffer to compute 2*a1 and 4*a2 cleanly.
     protected def self.toom3_eval_at2(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32) : Int32
       # Start with a0
-      a0n.times { |i| ea[i] = a0[i] }
-      ean = a0n
-      ean = 1 if ean == 0
-      if ean == 0
+      if a0n > 0
+        a0n.times { |i| ea[i] = a0[i] }
+        ean = a0n
+      else
         ea[0] = 0_u64
         ean = 1
       end
