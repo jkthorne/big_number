@@ -1,5 +1,4 @@
 require "./big_number/limb"
-require "./big_number/mpn"
 require "./big_number/big_int"
 
 module BigNumber
