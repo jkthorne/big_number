@@ -703,6 +703,41 @@ describe BigNumber::BigInt do
     BI.new(2).pow_mod(10, BI.new(1000)).to_s.should eq("24")
   end
 
+  # --- prime? ---
+
+  it "prime? small primes" do
+    [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31].each do |p|
+      BI.new(p).prime?.should be_true, "#{p} should be prime"
+    end
+  end
+
+  it "prime? small composites" do
+    [0, 1, 4, 6, 8, 9, 10, 12, 14, 15].each do |c|
+      BI.new(c).prime?.should be_false, "#{c} should not be prime"
+    end
+  end
+
+  it "prime? Carmichael numbers" do
+    [561, 1105, 1729].each do |c|
+      BI.new(c).prime?.should be_false, "Carmichael number #{c} should not be prime"
+    end
+  end
+
+  it "prime? Mersenne primes" do
+    # 2^61 - 1 is a Mersenne prime
+    m61 = (BI.new(1) << 61) - BI.new(1)
+    m61.prime?.should be_true
+    # 2^31 - 1 is a Mersenne prime
+    m31 = (BI.new(1) << 31) - BI.new(1)
+    m31.prime?.should be_true
+  end
+
+  it "prime? larger composite" do
+    # Product of two primes
+    composite = BI.new(104729) * BI.new(104743)
+    composite.prime?.should be_false
+  end
+
   # --- to_bytes / from_bytes ---
 
   it "to_bytes known vectors" do

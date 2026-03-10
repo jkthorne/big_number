@@ -745,6 +745,38 @@ module BigNumber
       (self % number).zero?
     end
 
+    def prime? : Bool
+      return false if self <= BigInt.new(1)
+      return true if self == BigInt.new(2) || self == BigInt.new(3)
+      return false if even?
+      return false if divisible_by?(3)
+
+      # Write self-1 = 2^r * d
+      d = self - BigInt.new(1)
+      r = d.trailing_zeros_count.to_i32
+      d = d >> r
+
+      # Deterministic witnesses sufficient for numbers < 3.3e24
+      witnesses = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]
+
+      witnesses.each do |a_int|
+        a = BigInt.new(a_int)
+        next if a >= self
+        x = a.pow_mod(d, self)
+        next if x == BigInt.new(1) || x == self - BigInt.new(1)
+        found = false
+        (r - 1).times do
+          x = x.pow_mod(BigInt.new(2), self)
+          if x == self - BigInt.new(1)
+            found = true
+            break
+          end
+        end
+        return false unless found
+      end
+      true
+    end
+
     # --- Conversion ---
 
     def to_bytes(big_endian : Bool = true) : Bytes
