@@ -131,6 +131,16 @@ module BigNumber
       @size > 0
     end
 
+    @[AlwaysInline]
+    def even? : Bool
+      zero? || (@limbs[0] & 1_u64) == 0
+    end
+
+    @[AlwaysInline]
+    def odd? : Bool
+      !zero? && (@limbs[0] & 1_u64) == 1
+    end
+
     # --- Comparison ---
 
     def <=>(other : BigInt) : Int32
@@ -481,6 +491,31 @@ module BigNumber
         base = base * base if e > 0
       end
       result
+    end
+
+    def pow_mod(exp : BigInt, mod : BigInt) : BigInt
+      raise ArgumentError.new("Negative exponent") if exp.negative?
+      raise ArgumentError.new("Modulus must be positive") if mod <= BigInt.new(0)
+      return BigInt.new if mod == BigInt.new(1)
+      result = BigInt.new(1) % mod
+      base = self % mod
+      e = exp.dup_value
+      while e > BigInt.new(0)
+        if e.odd?
+          result = (result * base) % mod
+        end
+        e = e >> 1
+        base = (base * base) % mod if e > BigInt.new(0)
+      end
+      result
+    end
+
+    def pow_mod(exp : Int, mod : BigInt) : BigInt
+      pow_mod(BigInt.new(exp), mod)
+    end
+
+    def pow_mod(exp : BigInt | Int, mod : Int) : BigInt
+      pow_mod(BigInt.new(exp), BigInt.new(mod))
     end
 
     # --- Bitwise Operations ---

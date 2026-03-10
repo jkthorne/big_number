@@ -657,6 +657,52 @@ describe BigNumber::BigInt do
 
   # === Step 2b: Missing Features ===
 
+  # --- even?/odd? ---
+
+  it "even? and odd?" do
+    BI.new(0).even?.should be_true
+    BI.new(0).odd?.should be_false
+    BI.new(1).even?.should be_false
+    BI.new(1).odd?.should be_true
+    BI.new(2).even?.should be_true
+    BI.new(-3).odd?.should be_true
+    BI.new(-4).even?.should be_true
+    BI.new("999999999999999999999999999999").even?.should be_false
+    BI.new("999999999999999999999999999998").even?.should be_true
+  end
+
+  # --- pow_mod ---
+
+  it "pow_mod basic" do
+    # 2^10 mod 1000 = 1024 mod 1000 = 24
+    BI.new(2).pow_mod(BI.new(10), BI.new(1000)).to_s.should eq("24")
+    # exp=0 -> 1
+    BI.new(5).pow_mod(BI.new(0), BI.new(7)).to_s.should eq("1")
+    # mod=1 -> 0
+    BI.new(5).pow_mod(BI.new(10), BI.new(1)).to_s.should eq("0")
+  end
+
+  it "pow_mod Fermat's little theorem" do
+    # For prime p, a^(p-1) ≡ 1 (mod p)
+    p = BI.new(104729) # prime
+    a = BI.new(12345)
+    a.pow_mod(p - BI.new(1), p).to_s.should eq("1")
+  end
+
+  it "pow_mod large values" do
+    base = BI.new("123456789012345678901234567890")
+    exp = BI.new("9999999999999999999")
+    mod = BI.new("1000000007")
+    result = base.pow_mod(exp, mod)
+    # Verify result is in range
+    (result >= BI.new(0)).should be_true
+    (result < mod).should be_true
+  end
+
+  it "pow_mod with Int convenience" do
+    BI.new(2).pow_mod(10, BI.new(1000)).to_s.should eq("24")
+  end
+
   # --- to_bytes / from_bytes ---
 
   it "to_bytes known vectors" do
