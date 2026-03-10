@@ -1441,7 +1441,6 @@ module BigNumber
       if bn < KARATSUBA_THRESHOLD
         limbs_mul_schoolbook(rp, ap, an, bp, bn)
       else
-        # Allocate scratch space for Karatsuba
         scratch = Pointer(Limb).malloc(karatsuba_scratch_size(an))
         limbs_mul_karatsuba(rp, ap, an, bp, bn, scratch)
       end
@@ -1461,55 +1460,56 @@ module BigNumber
     # Karatsuba multiply: O(n^1.585).
     # rp must have space for an+bn limbs. scratch must have karatsuba_scratch_size(an) limbs.
     protected def self.limbs_mul_karatsuba(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
-      # Fall back to schoolbook for small or unbalanced operands
       if bn < KARATSUBA_THRESHOLD
         limbs_mul_schoolbook(rp, ap, an, bp, bn)
         return
       end
 
-      # If very unbalanced (an >= 2*bn), slice a into chunks and multiply piecewise
       if an >= 2 * bn
         limbs_mul_unbalanced(rp, ap, an, bp, bn, scratch)
         return
       end
 
-      # Split at midpoint: m = bn / 2
-      # a = a1 * B^m + a0,  b = b1 * B^m + b0
+      # Split: a = a1*B^m + a0, b = b1*B^m + b0
       m = bn >> 1
-      a0 = ap;         a0n = m
-      a1 = ap + m;     a1n = an - m
-      b0 = bp;         b0n = m
-      b1 = bp + m;     b1n = bn - m
+      a0 = ap;       a0n = m
+      a1 = ap + m;   a1n = an - m
+      b0 = bp;       b0n = m
+      b1 = bp + m;   b1n = bn - m
 
-      # z0 = a0 * b0  (stored in rp[0..2m-1])
+      # z0 = a0 * b0 → rp[0..2m-1]
       limbs_mul_karatsuba(rp, a0, a0n, b0, b0n, scratch)
-      # Zero upper part of rp that we'll accumulate into
-      (an + bn - 2 * m).times { |i| rp[2 * m + i] = 0_u64 }
 
-      # z2 = a1 * b1  (stored in rp[2m..an+bn-1])
+      # Zero upper part of rp
+      i = 2 * m
+      while i < an + bn
+        rp[i] = 0_u64
+        i += 1
+      end
+
+      # z2 = a1 * b1 → rp[2m..]
       limbs_mul_karatsuba(rp + 2 * m, a1, a1n, b1, b1n, scratch)
 
-      # z1 = (a0 + a1) * (b0 + b1) - z0 - z2
-      # Compute |a0 + a1| and |b0 + b1| in scratch
+      # z1 = (a0+a1)*(b0+b1) - z0 - z2
+      # Layout in scratch: [t1 (m+2) | t2 (m+2) | t3 (2m+4) | recursive scratch]
       t1 = scratch
       t1n = Math.max(a0n, a1n) + 1
       t2 = scratch + t1n
       t2n = Math.max(b0n, b1n) + 1
 
-      # a0 + a1
+      # t1 = a0 + a1
       if a0n >= a1n
         t1[a0n] = limbs_add(t1, a0, a0n, a1, a1n)
       else
         t1[a1n] = limbs_add(t1, a1, a1n, a0, a0n)
       end
-      # Trim leading zero
       actual_t1n = t1n
       while actual_t1n > 0 && t1[actual_t1n - 1] == 0
         actual_t1n -= 1
       end
       actual_t1n = 1 if actual_t1n == 0
 
-      # b0 + b1
+      # t2 = b0 + b1
       if b0n >= b1n
         t2[b0n] = limbs_add(t2, b0, b0n, b1, b1n)
       else
@@ -1521,7 +1521,7 @@ module BigNumber
       end
       actual_t2n = 1 if actual_t2n == 0
 
-      # t3 = (a0+a1) * (b0+b1) in scratch after t1 and t2
+      # t3 = t1 * t2, placed after t1 and t2 in scratch
       t3 = scratch + t1n + t2n
       t3n = actual_t1n + actual_t2n
       next_scratch = t3 + t3n
@@ -1530,31 +1530,32 @@ module BigNumber
       else
         limbs_mul_karatsuba(t3, t2, actual_t2n, t1, actual_t1n, next_scratch)
       end
-      # Trim
       while t3n > 0 && t3[t3n - 1] == 0
         t3n -= 1
       end
 
-      # t3 -= z0 (rp[0..2m-1])
+      # t3 -= z0
       z0n = a0n + b0n
+      while z0n > 0 && rp[z0n - 1] == 0
+        z0n -= 1
+      end
       limbs_sub(t3, t3, t3n, rp, z0n) if z0n > 0 && t3n >= z0n
 
-      # t3 -= z2 (rp[2m..])
+      # t3 -= z2
       z2n = a1n + b1n
       while z2n > 0 && rp[2 * m + z2n - 1] == 0
         z2n -= 1
       end
       limbs_sub(t3, t3, t3n, rp + 2 * m, z2n) if z2n > 0 && t3n >= z2n
 
-      # Trim t3 again
+      # Trim t3
       while t3n > 0 && t3[t3n - 1] == 0
         t3n -= 1
       end
 
-      # Add t3 at position m in rp
+      # Add t3 at position m
       if t3n > 0
-        carry = limbs_add(rp + m, rp + m, an + bn - m, t3, t3n)
-        # carry should be absorbed since result fits in an+bn limbs
+        limbs_add(rp + m, rp + m, an + bn - m, t3, t3n)
       end
     end
 
@@ -1563,39 +1564,31 @@ module BigNumber
       # Zero the result
       (an + bn).times { |i| rp[i] = 0_u64 }
 
-      # Temporary buffer for each chunk product
-      tmp = Pointer(Limb).malloc(2 * bn)
+      # Use scratch for the chunk product buffer (needs 2*bn limbs)
+      tmp = scratch
+      inner_scratch = scratch + 2 * bn
 
       offset = 0
       remaining = an
       while remaining > 0
         chunk = Math.min(remaining, bn)
+        # Ensure larger operand is first for Karatsuba
         if chunk >= bn
-          limbs_mul_karatsuba(tmp, ap + offset, chunk, bp, bn, scratch)
+          limbs_mul_karatsuba(tmp, ap + offset, chunk, bp, bn, inner_scratch)
         else
-          # Last chunk may be smaller
-          if chunk >= bn
-            limbs_mul_karatsuba(tmp, ap + offset, chunk, bp, bn, scratch)
-          else
-            # smaller * larger: swap if needed
-            if chunk >= bn
-              limbs_mul_karatsuba(tmp, ap + offset, chunk, bp, bn, scratch)
-            else
-              limbs_mul_karatsuba(tmp, bp, bn, ap + offset, chunk, scratch)
-            end
-          end
+          limbs_mul_karatsuba(tmp, bp, bn, ap + offset, chunk, inner_scratch)
         end
-        # Add tmp to rp at offset
         product_size = chunk + bn
-        carry = limbs_add(rp + offset, rp + offset, an + bn - offset, tmp, product_size)
+        limbs_add(rp + offset, rp + offset, an + bn - offset, tmp, product_size)
         offset += chunk
         remaining -= chunk
       end
     end
 
     protected def self.karatsuba_scratch_size(n : Int32) : Int32
-      # Conservative estimate: each level needs ~4n, with log2(n/threshold) levels
-      n * 8 + 64
+      # Each Karatsuba level needs ~4*(n/2+1) scratch plus recursive scratch.
+      # S(n) = 4*(n/2+1) + S(n/2+1) ≈ 4n. Add 2*n for unbalanced multiply tmp buffer.
+      Math.max(6 * n + 64, 256)
     end
 
     # Divide limb array by a single limb. Returns remainder.
