@@ -321,6 +321,67 @@ describe BigNumber::BigInt do
     end
   end
 
+  it "toom3: multiplies numbers at threshold boundary" do
+    # ~90 limbs each (TOOM3_THRESHOLD)
+    a_str = "9" * 1710   # 90 * 19
+    b_str = "7" * 1710
+    ours = (BI.new(a_str) * BI.new(b_str)).to_s
+    theirs = (::BigInt.new(a_str) * ::BigInt.new(b_str)).to_s
+    ours.should eq(theirs)
+  end
+
+  it "toom3: multiplies large balanced operands" do
+    a_str = "9" * 9500   # ~500 limbs
+    b_str = "7" * 9500
+    ours = (BI.new(a_str) * BI.new(b_str)).to_s
+    theirs = (::BigInt.new(a_str) * ::BigInt.new(b_str)).to_s
+    ours.should eq(theirs)
+  end
+
+  it "toom3: multiplies 1000-limb numbers" do
+    a_str = "9" * 19000
+    b_str = "7" * 19000
+    ours = (BI.new(a_str) * BI.new(b_str)).to_s
+    theirs = (::BigInt.new(a_str) * ::BigInt.new(b_str)).to_s
+    ours.should eq(theirs)
+  end
+
+  it "toom3: handles unbalanced operands" do
+    a_str = "9" * 5700   # ~300 limbs
+    b_str = "7" * 2850   # ~150 limbs
+    ours = (BI.new(a_str) * BI.new(b_str)).to_s
+    theirs = (::BigInt.new(a_str) * ::BigInt.new(b_str)).to_s
+    ours.should eq(theirs)
+  end
+
+  it "toom3: operands not divisible by 3" do
+    # 101 limbs - not divisible by 3
+    a_str = "9" * 1919
+    b_str = "7" * 1919
+    ours = (BI.new(a_str) * BI.new(b_str)).to_s
+    theirs = (::BigInt.new(a_str) * ::BigInt.new(b_str)).to_s
+    ours.should eq(theirs)
+  end
+
+  it "toom3: one operand below threshold" do
+    a_str = "9" * 3800  # ~200 limbs (above threshold)
+    b_str = "7" * 1520  # ~80 limbs (below threshold)
+    ours = (BI.new(a_str) * BI.new(b_str)).to_s
+    theirs = (::BigInt.new(a_str) * ::BigInt.new(b_str)).to_s
+    ours.should eq(theirs)
+  end
+
+  it "fuzz: mul matches stdlib (large, toom3 range)" do
+    rng = Random.new(99)
+    200.times do
+      a_str = random_decimal(rng, max_digits: 4000)
+      b_str = random_decimal(rng, max_digits: 4000)
+      ours = BI.new(a_str) * BI.new(b_str)
+      theirs = ::BigInt.new(a_str) * ::BigInt.new(b_str)
+      ours.to_s.should eq(theirs.to_s), "toom3 mul failed: #{a_str.size} digits * #{b_str.size} digits"
+    end
+  end
+
   it "fuzz: divmod matches stdlib" do
     rng = Random.new(45)
     1000.times do
