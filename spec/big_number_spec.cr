@@ -347,6 +347,315 @@ describe BigNumber::BigInt do
       BI.new(s).to_s.should eq(normalize_decimal(s))
     end
   end
+
+  # === Step 2: Make It Complete ===
+
+  # --- Exponentiation ---
+
+  it "power basic" do
+    (BI.new(2) ** 10).to_s.should eq("1024")
+    (BI.new(0) ** 0).to_s.should eq("1")
+    (BI.new(-2) ** 3).to_s.should eq("-8")
+    (BI.new(-2) ** 4).to_s.should eq("16")
+    (BI.new(1) ** 1000).to_s.should eq("1")
+  end
+
+  it "power large" do
+    (BI.new(2) ** 100).to_s.should eq((::BigInt.new(2) ** 100).to_s)
+  end
+
+  it "power negative exponent raises" do
+    expect_raises(ArgumentError) { BI.new(2) ** -1 }
+  end
+
+  # --- Number Theory ---
+
+  it "gcd basic" do
+    BI.new(12).gcd(BI.new(8)).to_s.should eq("4")
+    BI.new(7).gcd(BI.new(13)).to_s.should eq("1")
+  end
+
+  it "gcd with zero" do
+    BI.new(42).gcd(BI.new(0)).to_s.should eq("42")
+    BI.new(0).gcd(BI.new(42)).to_s.should eq("42")
+    BI.new(0).gcd(BI.new(0)).to_s.should eq("0")
+  end
+
+  it "gcd with negative" do
+    BI.new(-12).gcd(BI.new(8)).to_s.should eq("4")
+    BI.new(12).gcd(BI.new(-8)).to_s.should eq("4")
+  end
+
+  it "lcm" do
+    BI.new(4).lcm(BI.new(6)).to_s.should eq("12")
+    BI.new(0).lcm(BI.new(5)).to_s.should eq("0")
+  end
+
+  it "factorial" do
+    BI.new(0).factorial.to_s.should eq("1")
+    BI.new(1).factorial.to_s.should eq("1")
+    BI.new(10).factorial.to_s.should eq("3628800")
+    BI.new(20).factorial.to_s.should eq("2432902008176640000")
+  end
+
+  it "divisible_by?" do
+    BI.new(12).divisible_by?(BI.new(3)).should be_true
+    BI.new(13).divisible_by?(BI.new(3)).should be_false
+    BI.new(0).divisible_by?(BI.new(5)).should be_true
+  end
+
+  # --- Bitwise ---
+
+  it "bitwise NOT" do
+    (~BI.new(0)).to_s.should eq("-1")
+    (~BI.new(1)).to_s.should eq("-2")
+    (~BI.new(-1)).to_s.should eq("0")
+    (~BI.new(-2)).to_s.should eq("1")
+  end
+
+  it "bitwise AND positive" do
+    (BI.new(0xff) & BI.new(0x0f)).to_s.should eq("15")
+    (BI.new(0) & BI.new(42)).to_s.should eq("0")
+  end
+
+  it "bitwise AND negative" do
+    (BI.new(-3) & BI.new(5)).to_s.should eq(((-3).to_big_i & 5.to_big_i).to_s)
+  end
+
+  it "bitwise OR" do
+    (BI.new(0xf0) | BI.new(0x0f)).to_s.should eq("255")
+    (BI.new(-3) | BI.new(5)).to_s.should eq(((-3).to_big_i | 5.to_big_i).to_s)
+  end
+
+  it "bitwise XOR" do
+    (BI.new(0xff) ^ BI.new(0x0f)).to_s.should eq("240")
+    (BI.new(-3) ^ BI.new(5)).to_s.should eq(((-3).to_big_i ^ 5.to_big_i).to_s)
+  end
+
+  it "left shift" do
+    (BI.new(1) << 0).to_s.should eq("1")
+    (BI.new(1) << 1).to_s.should eq("2")
+    (BI.new(1) << 64).to_s.should eq((::BigInt.new(1) << 64).to_s)
+    (BI.new(-3) << 2).to_s.should eq("-12")
+  end
+
+  it "right shift" do
+    (BI.new(8) >> 1).to_s.should eq("4")
+    (BI.new(8) >> 3).to_s.should eq("1")
+    (BI.new(8) >> 4).to_s.should eq("0")
+    (BI.new(-1) >> 1).to_s.should eq("-1")
+    (BI.new(-4) >> 1).to_s.should eq("-2")
+    (BI.new(-3) >> 1).to_s.should eq("-2")
+  end
+
+  it "bit" do
+    BI.new(5).bit(0).should eq(1)
+    BI.new(5).bit(1).should eq(0)
+    BI.new(5).bit(2).should eq(1)
+    BI.new(5).bit(3).should eq(0)
+    BI.new(-1).bit(100).should eq(1)
+    BI.new(0).bit(0).should eq(0)
+  end
+
+  it "bit_length" do
+    BI.new(0).bit_length.should eq(1)
+    BI.new(1).bit_length.should eq(1)
+    BI.new(255).bit_length.should eq(8)
+    BI.new(256).bit_length.should eq(9)
+    BI.new(-1).bit_length.should eq(1)
+    BI.new(-128).bit_length.should eq(8)
+    BI.new(-129).bit_length.should eq(8) # stdlib: -129 needs 8 bits (two's complement: 0x7f needs 8)
+  end
+
+  it "popcount" do
+    BI.new(7).popcount.should eq(3)
+    BI.new(0).popcount.should eq(0)
+    BI.new(-1).popcount.should eq(UInt64::MAX)
+  end
+
+  it "trailing_zeros_count" do
+    BI.new(12).trailing_zeros_count.should eq(2)
+    BI.new(1).trailing_zeros_count.should eq(0)
+    BI.new(0).trailing_zeros_count.should eq(0)
+  end
+
+  # --- Conversions ---
+
+  it "to_i32 checked" do
+    BI.new(42).to_i32.should eq(42)
+    BI.new(-42).to_i32.should eq(-42)
+    expect_raises(OverflowError) { BI.new(Int32::MAX.to_i64 + 1).to_i32 }
+  end
+
+  it "to_u32 checked" do
+    BI.new(42).to_u32.should eq(42_u32)
+    expect_raises(OverflowError) { BI.new(-1).to_u32 }
+    expect_raises(OverflowError) { BI.new(UInt32::MAX.to_u64 + 1).to_u32 }
+  end
+
+  it "to_i128" do
+    BI.new(Int64::MAX).to_i128.should eq(Int64::MAX.to_i128)
+    BI.new(Int64::MIN).to_i128.should eq(Int64::MIN.to_i128)
+  end
+
+  it "to_u128" do
+    BI.new(UInt64::MAX).to_u128.should eq(UInt64::MAX.to_u128)
+  end
+
+  it "unchecked conversions" do
+    BI.new(256).to_u8!.should eq(0_u8)
+    BI.new(256).to_i8!.should eq(0_i8)
+  end
+
+  it "to_f32" do
+    BI.new(42).to_f32.should eq(42.0_f32)
+  end
+
+  it "digits" do
+    BI.new(123).digits.should eq([3, 2, 1])
+    BI.new(123).digits(16).should eq([11, 7])
+    BI.new(0).digits.should eq([0])
+  end
+
+  # --- to_s options ---
+
+  it "to_s with precision" do
+    BI.new(42).to_s(10, precision: 5).should eq("00042")
+    BI.new(0).to_s(10, precision: 3).should eq("000")
+  end
+
+  it "to_s with upcase" do
+    BI.new(255).to_s(16, upcase: true).should eq("FF")
+    BI.new(255).to_s(16, upcase: false).should eq("ff")
+  end
+
+  # --- Misc ---
+
+  it "next_power_of_two" do
+    BI.new(5).next_power_of_two.to_s.should eq("8")
+    BI.new(8).next_power_of_two.to_s.should eq("8")
+    BI.new(1).next_power_of_two.to_s.should eq("1")
+  end
+
+  it "factor_by" do
+    q, c = BI.new(72).factor_by(2)
+    q.to_s.should eq("9")
+    c.should eq(3_u64)
+    q2, c2 = BI.new(72).factor_by(3)
+    q2.to_s.should eq("8")
+    c2.should eq(2_u64)
+  end
+
+  # --- Wrapping & remainder ---
+
+  it "wrapping ops" do
+    (BI.new(42) &+ BI.new(8)).to_s.should eq("50")
+    (BI.new(42) &- BI.new(8)).to_s.should eq("34")
+    (BI.new(6) &* BI.new(7)).to_s.should eq("42")
+  end
+
+  it "remainder" do
+    BI.new(7).remainder(BI.new(3)).to_s.should eq("1")
+    BI.new(-7).remainder(BI.new(3)).to_s.should eq("-1")
+  end
+
+  # --- Extensions ---
+
+  it "Int + BigInt" do
+    (42 + BI.new(8)).to_s.should eq("50")
+    (42 - BI.new(8)).to_s.should eq("34")
+    (6 * BI.new(7)).to_s.should eq("42")
+  end
+
+  it "Int <=> BigInt" do
+    (42 == BI.new(42)).should be_true
+    ((42 <=> BI.new(41)) > 0).should be_true
+    ((42 <=> BI.new(43)) < 0).should be_true
+  end
+
+  it "Int#to_big_i" do
+    42.to_big_i.to_s.should eq("42")
+  end
+
+  it "String#to_big_i" do
+    "12345".to_big_i.to_s.should eq("12345")
+    "ff".to_big_i(16).to_s.should eq("255")
+  end
+
+  it "Float#to_big_i" do
+    3.7.to_big_i.to_s.should eq("3")
+    (-3.7).to_big_i.to_s.should eq("-3")
+  end
+
+  it "BigInt.new(BigInt) copies" do
+    a = BI.new(42)
+    b = BI.new(a)
+    b.to_s.should eq("42")
+  end
+
+  # --- Fuzz: Step 2 ---
+
+  it "fuzz: bitwise ops match stdlib" do
+    rng = Random.new(50)
+    1000.times do
+      a_str = random_decimal(rng, max_digits: 40)
+      b_str = random_decimal(rng, max_digits: 40)
+      ours_a = BI.new(a_str)
+      ours_b = BI.new(b_str)
+      theirs_a = ::BigInt.new(a_str)
+      theirs_b = ::BigInt.new(b_str)
+
+      (~ours_a).to_s.should eq((~theirs_a).to_s), "NOT failed: ~#{a_str}"
+      (ours_a & ours_b).to_s.should eq((theirs_a & theirs_b).to_s), "AND failed: #{a_str} & #{b_str}"
+      (ours_a | ours_b).to_s.should eq((theirs_a | theirs_b).to_s), "OR failed: #{a_str} | #{b_str}"
+      (ours_a ^ ours_b).to_s.should eq((theirs_a ^ theirs_b).to_s), "XOR failed: #{a_str} ^ #{b_str}"
+    end
+  end
+
+  it "fuzz: shift matches stdlib" do
+    rng = Random.new(51)
+    1000.times do
+      a_str = random_decimal(rng, max_digits: 40)
+      shift = rng.rand(0..128)
+      ours = BI.new(a_str)
+      theirs = ::BigInt.new(a_str)
+
+      (ours << shift).to_s.should eq((theirs << shift).to_s), "lshift failed: #{a_str} << #{shift}"
+      (ours >> shift).to_s.should eq((theirs >> shift).to_s), "rshift failed: #{a_str} >> #{shift}"
+    end
+  end
+
+  it "fuzz: gcd matches stdlib" do
+    rng = Random.new(52)
+    1000.times do
+      a_str = random_decimal(rng, max_digits: 40)
+      b_str = random_decimal(rng, max_digits: 40)
+      ours = BI.new(a_str).gcd(BI.new(b_str))
+      theirs = ::BigInt.new(a_str).gcd(::BigInt.new(b_str))
+      ours.to_s.should eq(theirs.to_s), "gcd failed: gcd(#{a_str}, #{b_str})"
+    end
+  end
+
+  it "fuzz: power matches stdlib" do
+    rng = Random.new(53)
+    500.times do
+      base_str = random_decimal(rng, max_digits: 10)
+      exp = rng.rand(0..20)
+      ours = BI.new(base_str) ** exp
+      theirs = ::BigInt.new(base_str) ** exp
+      ours.to_s.should eq(theirs.to_s), "power failed: #{base_str} ** #{exp}"
+    end
+  end
+
+  it "fuzz: bit_length matches stdlib" do
+    rng = Random.new(54)
+    1000.times do
+      a_str = random_decimal(rng, max_digits: 40)
+      ours = BI.new(a_str).bit_length
+      theirs = ::BigInt.new(a_str).bit_length
+      ours.should eq(theirs), "bit_length failed: #{a_str}"
+    end
+  end
 end
 
 # --- Helpers ---
