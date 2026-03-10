@@ -1,0 +1,10 @@
+name: big_number
+version: 0.1.0
+description: Pure Crystal arbitrary-precision arithmetic — zero C dependencies
+
+authors:
+  - Jack Thorne <jack@myrenee.io>
+
+crystal: '>= 1.19.1'
+
+license: MIT
