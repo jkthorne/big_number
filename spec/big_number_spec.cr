@@ -703,6 +703,46 @@ describe BigNumber::BigInt do
     BI.new(2).pow_mod(10, BI.new(1000)).to_s.should eq("24")
   end
 
+  # --- sqrt ---
+
+  it "sqrt perfect squares" do
+    BI.new(0).sqrt.to_s.should eq("0")
+    BI.new(1).sqrt.to_s.should eq("1")
+    BI.new(4).sqrt.to_s.should eq("2")
+    BI.new(9).sqrt.to_s.should eq("3")
+    BI.new(16).sqrt.to_s.should eq("4")
+    BI.new(100).sqrt.to_s.should eq("10")
+    BI.new(10000).sqrt.to_s.should eq("100")
+  end
+
+  it "sqrt non-perfect (floor)" do
+    BI.new(2).sqrt.to_s.should eq("1")
+    BI.new(3).sqrt.to_s.should eq("1")
+    BI.new(5).sqrt.to_s.should eq("2")
+    BI.new(8).sqrt.to_s.should eq("2")
+    BI.new(99).sqrt.to_s.should eq("9")
+  end
+
+  it "sqrt large values" do
+    val = BI.new("100000000000000000000000000000000000000") # 10^38
+    val.sqrt.to_s.should eq("10000000000000000000") # 10^19
+  end
+
+  it "sqrt invariant r² ≤ n < (r+1)²" do
+    rng = Random.new(61)
+    200.times do
+      s = random_decimal(rng, max_digits: 40)
+      n = BI.new(s).abs
+      r = n.sqrt
+      (r * r <= n).should be_true, "r² > n for n=#{n}"
+      ((r + BI.new(1)) * (r + BI.new(1)) > n).should be_true, "(r+1)² ≤ n for n=#{n}"
+    end
+  end
+
+  it "sqrt negative raises" do
+    expect_raises(ArgumentError) { BI.new(-4).sqrt }
+  end
+
   # --- prime? ---
 
   it "prime? small primes" do

@@ -745,6 +745,21 @@ module BigNumber
       (self % number).zero?
     end
 
+    def sqrt : BigInt
+      raise ArgumentError.new("Square root of negative number") if negative?
+      return BigInt.new if zero?
+      return BigInt.new(1) if self == BigInt.new(1)
+
+      # Newton's method
+      x = BigInt.new(1) << ((bit_length + 1) // 2)
+      loop do
+        x1 = (x + self // x) >> 1
+        break if x1 >= x
+        x = x1
+      end
+      x
+    end
+
     def prime? : Bool
       return false if self <= BigInt.new(1)
       return true if self == BigInt.new(2) || self == BigInt.new(3)
