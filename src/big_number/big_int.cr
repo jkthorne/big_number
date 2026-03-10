@@ -920,10 +920,12 @@ module BigNumber
       to_s(io, 10)
     end
 
+    DC_TO_S_THRESHOLD = 50
+
     def to_s(io : IO, base : Int = 10, *, precision : Int = 1, upcase : Bool = false) : Nil
       raise ArgumentError.new("Invalid base #{base}") unless 2 <= base <= 36
       if zero?
-        io << '-' if @size < 0 # -0 shouldn't happen but be safe
+        io << '-' if @size < 0
         pad = Math.max(precision.to_i32, 1)
         pad.times { io << '0' }
         return
@@ -931,28 +933,184 @@ module BigNumber
       io << '-' if negative?
 
       n = abs_size
-      tmp = Pointer(Limb).malloc(n)
-      tmp.copy_from(@limbs, n)
-      tmp_size = n
+      if n >= DC_TO_S_THRESHOLD
+        BigInt.dc_to_s(io, @limbs, n, base.to_i32, precision.to_i32, upcase)
+      else
+        BigInt.simple_to_s(io, @limbs, n, base.to_i32, precision.to_i32, upcase)
+      end
+    end
 
-      raw_digits = [] of UInt8
+    # Simple O(n²) base conversion for small numbers.
+    # Extracts digits in chunks for efficiency: divide by base^chunk_size to get
+    # chunk_size digits at once, then extract individual digits from the remainder.
+    protected def self.simple_to_s(io : IO, limbs : Pointer(Limb), size : Int32, base : Int32, precision : Int32, upcase : Bool)
+      tmp = Pointer(Limb).malloc(size)
+      tmp.copy_from(limbs, size)
+      tmp_size = size
+
+      chunk_size, chunk_base = chunk_params(base)
+
+      # Pre-allocate digit buffer
+      max_digits = (size.to_f64 * 64.0 * Math.log(2.0) / Math.log(base.to_f64)).to_i32 + 2
+      max_digits = Math.max(max_digits, precision)
+      buf = Pointer(UInt8).malloc(max_digits)
+      pos = max_digits - 1
+
       while tmp_size > 0
-        rem = BigInt.limbs_div_rem_1(tmp, tmp, tmp_size, base.to_u64)
-        raw_digits << rem.to_u8
+        # Extract chunk_size digits at once by dividing by chunk_base
+        rem = limbs_div_rem_1(tmp, tmp, tmp_size, chunk_base)
         while tmp_size > 0 && tmp[tmp_size - 1] == 0
           tmp_size -= 1
         end
+        # Extract individual digits from rem
+        if tmp_size > 0
+          # Not the last chunk — emit exactly chunk_size digits (with leading zeros)
+          chunk_size.times do
+            buf[pos] = (rem % base.to_u64).to_u8
+            rem = rem // base.to_u64
+            pos -= 1
+          end
+        else
+          # Last chunk — only emit significant digits
+          while rem > 0 && pos >= 0
+            buf[pos] = (rem % base.to_u64).to_u8
+            rem = rem // base.to_u64
+            pos -= 1
+          end
+        end
       end
 
-      # Pad with leading zeros to meet precision
-      while raw_digits.size < precision
-        raw_digits << 0_u8
+      # Fill leading zeros for precision
+      while (max_digits - 1 - pos) < precision
+        buf[pos] = 0_u8
+        pos -= 1
       end
 
-      raw_digits.reverse_each do |d|
-        c = BigInt.digit_to_char(d)
+      start = pos + 1
+      i = start
+      while i < max_digits
+        c = digit_to_char(buf[i])
         io << (upcase ? c.upcase : c)
+        i += 1
       end
+    end
+
+    # Divide-and-conquer base conversion: O(n·log²n).
+    # Precomputes powers of base, splits number in half, converts each half recursively.
+    protected def self.dc_to_s(io : IO, limbs : Pointer(Limb), size : Int32, base : Int32, precision : Int32, upcase : Bool)
+      # Estimate digit count: digits ≈ bit_length * log(2)/log(base)
+      top = limbs[size - 1]
+      bit_len = (size - 1) * 64 + (64 - top.leading_zeros_count.to_i32)
+      est_digits = (bit_len.to_f64 * Math.log(2.0) / Math.log(base.to_f64)).to_i32 + 2
+
+      # Precompute base powers: powers[i] = base^(chunk * 2^i) where chunk = chunk_params digits
+      powers = precompute_base_powers(base, est_digits)
+
+      # Allocate digit buffer (filled right-to-left with leading zeros)
+      buf = Pointer(UInt8).malloc(est_digits)
+      buf_len = est_digits
+      est_digits.times { |i| buf[i] = 0_u8 }
+
+      # Copy limbs into a working BigInt
+      num = BigInt.new(capacity: size)
+      num.@limbs.copy_from(limbs, size)
+      num.set_size(size)
+
+      # Recursively fill buffer
+      dc_to_s_recurse(buf, buf_len, num, base, powers, powers.size - 1)
+
+      # Skip leading zeros (but respect precision)
+      start = 0
+      while start < buf_len - 1 && buf[start] == 0 && (buf_len - start) > precision
+        start += 1
+      end
+
+      i = start
+      while i < buf_len
+        c = digit_to_char(buf[i])
+        io << (upcase ? c.upcase : c)
+        i += 1
+      end
+    end
+
+    # Precompute powers: base^1, base^2, base^4, base^8, ... by repeated squaring
+    # Each power[i] splits off 2^i * chunk_size digits from the number.
+    protected def self.precompute_base_powers(base : Int32, max_digits : Int32) : Array(BigInt)
+      chunk_size, _ = chunk_params(base)
+      powers = [] of BigInt
+      # power[0] = base^chunk_size
+      p = BigInt.new(base) ** chunk_size
+      powers << p
+      digits_covered = chunk_size
+      while digits_covered * 2 < max_digits
+        p = p * p
+        powers << p
+        digits_covered *= 2
+      end
+      powers
+    end
+
+    # Recursively convert num into buf[0..buf_len-1].
+    # level is the current power table index to split at.
+    protected def self.dc_to_s_recurse(buf : Pointer(UInt8), buf_len : Int32, num : BigInt, base : Int32, powers : Array(BigInt), level : Int32)
+      # Base case: small enough for batch digit extraction
+      if level < 0 || num.abs_size < DC_TO_S_THRESHOLD
+        n = num.abs_size
+        return if n == 0 # buf already zero-filled
+
+        chunk_size, chunk_base = chunk_params(base)
+        tmp = Pointer(Limb).malloc(n)
+        tmp.copy_from(num.@limbs, n)
+        tmp_size = n
+        pos = buf_len - 1
+
+        while tmp_size > 0 && pos >= 0
+          # Extract chunk_size digits at once
+          rem = limbs_div_rem_1(tmp, tmp, tmp_size, chunk_base)
+          while tmp_size > 0 && tmp[tmp_size - 1] == 0
+            tmp_size -= 1
+          end
+          if tmp_size > 0
+            # Not the last chunk: emit exactly chunk_size digits
+            chunk_size.times do
+              break if pos < 0
+              buf[pos] = (rem % base.to_u64).to_u8
+              rem = rem // base.to_u64
+              pos -= 1
+            end
+          else
+            # Last chunk: only significant digits
+            while rem > 0 && pos >= 0
+              buf[pos] = (rem % base.to_u64).to_u8
+              rem = rem // base.to_u64
+              pos -= 1
+            end
+          end
+        end
+        return
+      end
+
+      divisor = powers[level]
+      # If num < divisor, skip this level
+      if num.abs_size < divisor.abs_size || (num.abs_size == divisor.abs_size && limbs_cmp(num.@limbs, num.abs_size, divisor.@limbs, divisor.abs_size) < 0)
+        dc_to_s_recurse(buf, buf_len, num, base, powers, level - 1)
+        return
+      end
+
+      # Split: num = hi * divisor + lo
+      hi, lo = num.tdiv_rem(divisor)
+
+      # The divisor covers chunk_size * 2^level digits → that's the size of the lower half
+      chunk_size, _ = chunk_params(base)
+      lo_digits = chunk_size * (1 << level)
+      if lo_digits > buf_len
+        lo_digits = buf_len
+      end
+      hi_digits = buf_len - lo_digits
+
+      # Recurse on each half
+      dc_to_s_recurse(buf, hi_digits, hi, base, powers, level - 1)
+      dc_to_s_recurse(buf + hi_digits, lo_digits, lo, base, powers, level - 1)
     end
 
     def inspect(io : IO) : Nil
