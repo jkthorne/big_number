@@ -353,15 +353,333 @@ module BigNumber
       tdiv_rem(other)[1]
     end
 
+    def remainder(other : BigInt) : BigInt
+      tmod(other)
+    end
+
+    def remainder(other : Int) : BigInt
+      tmod(BigInt.new(other))
+    end
+
+    # Wrapping ops — BigInt can't overflow, so these are identical to normal ops
+    def &+(other) : BigInt
+      self + other
+    end
+
+    def &-(other) : BigInt
+      self - other
+    end
+
+    def &*(other) : BigInt
+      self * other
+    end
+
+    # Unsafe division variants — same as safe versions for BigInt
+    def unsafe_floored_div(other : BigInt) : BigInt
+      self // other
+    end
+
+    def unsafe_floored_div(other : Int) : BigInt
+      self // other
+    end
+
+    def unsafe_floored_mod(other : BigInt) : BigInt
+      self % other
+    end
+
+    def unsafe_floored_mod(other : Int) : BigInt
+      self % other
+    end
+
+    def unsafe_floored_divmod(other : BigInt) : {BigInt, BigInt}
+      divmod(other)
+    end
+
+    def unsafe_floored_divmod(other : Int) : {BigInt, BigInt}
+      divmod(BigInt.new(other))
+    end
+
+    def unsafe_truncated_div(other : BigInt) : BigInt
+      tdiv(other)
+    end
+
+    def unsafe_truncated_div(other : Int) : BigInt
+      tdiv(BigInt.new(other))
+    end
+
+    def unsafe_truncated_mod(other : BigInt) : BigInt
+      tmod(other)
+    end
+
+    def unsafe_truncated_mod(other : Int) : BigInt
+      tmod(BigInt.new(other))
+    end
+
+    def unsafe_truncated_divmod(other : BigInt) : {BigInt, BigInt}
+      tdiv_rem(other)
+    end
+
+    def unsafe_truncated_divmod(other : Int) : {BigInt, BigInt}
+      tdiv_rem(BigInt.new(other))
+    end
+
+    # --- Exponentiation ---
+
+    def **(exp : Int) : BigInt
+      raise ArgumentError.new("Negative exponent #{exp}") if exp < 0
+      return BigInt.new(1) if exp == 0
+      return dup_value if exp == 1
+      return BigInt.new if zero?
+
+      base = dup_value
+      result = BigInt.new(1)
+      e = exp.to_i64
+      while e > 0
+        if e.odd?
+          result = result * base
+        end
+        e >>= 1
+        base = base * base if e > 0
+      end
+      result
+    end
+
+    # --- Bitwise Operations ---
+
+    def ~ : BigInt
+      # ~x = -(x + 1)
+      if negative?
+        # ~(-x) = x - 1
+        self.abs - BigInt.new(1)
+      else
+        # ~x = -(x + 1)
+        -(self + BigInt.new(1))
+      end
+    end
+
+    def <<(count : Int) : BigInt
+      return self >> (-count) if count < 0
+      return dup_value if count == 0
+      return BigInt.new if zero?
+
+      whole_limbs = count.to_i32 // 64
+      bit_shift = count.to_i32 % 64
+
+      n = abs_size
+      new_size = n + whole_limbs + (bit_shift > 0 ? 1 : 0)
+      result = BigInt.new
+      result.ensure_capacity(new_size)
+
+      # Zero the bottom limbs
+      whole_limbs.times { |i| result.@limbs[i] = 0_u64 }
+
+      if bit_shift > 0
+        carry = BigInt.limbs_lshift(result.@limbs + whole_limbs, @limbs, n, bit_shift)
+        result.@limbs[whole_limbs + n] = carry
+      else
+        (result.@limbs + whole_limbs).copy_from(@limbs, n)
+      end
+
+      result.set_size(new_size)
+      result.normalize!
+      result.set_size(-result.@size) if negative?
+      result
+    end
+
+    def >>(count : Int) : BigInt
+      return self << (-count) if count < 0
+      return dup_value if count == 0
+      return BigInt.new if zero?
+
+      whole_limbs = count.to_i32 // 64
+      bit_shift = count.to_i32 % 64
+
+      n = abs_size
+      # If shifting away all limbs
+      if whole_limbs >= n
+        return negative? ? BigInt.new(-1) : BigInt.new
+      end
+
+      new_size = n - whole_limbs
+      result = BigInt.new
+      result.ensure_capacity(new_size)
+
+      if bit_shift > 0
+        BigInt.limbs_rshift(result.@limbs, @limbs + whole_limbs, new_size, bit_shift)
+      else
+        result.@limbs.copy_from(@limbs + whole_limbs, new_size)
+      end
+
+      result.set_size(new_size)
+      result.normalize!
+
+      if negative?
+        # Arithmetic right shift: if any shifted-out bits were set, subtract 1 from result
+        # (equivalent to floor division by 2^count for negative numbers)
+        lost_bits = false
+        whole_limbs.times do |i|
+          if @limbs[i] != 0
+            lost_bits = true
+            break
+          end
+        end
+        if !lost_bits && bit_shift > 0
+          mask = (1_u64 << bit_shift) &- 1
+          lost_bits = (@limbs[whole_limbs] & mask) != 0
+        end
+        result.set_size(-result.@size) if result.@size != 0
+        if lost_bits
+          result = result - BigInt.new(1)
+        end
+      end
+
+      result
+    end
+
+    def unsafe_shr(count : Int) : self
+      self >> count
+    end
+
+    def bit(index : Int) : Int32
+      return 0 if index < 0
+      limb_idx = index.to_i32 // 64
+      bit_idx = index.to_i32 % 64
+
+      if positive? || zero?
+        return 0 if limb_idx >= abs_size
+        (@limbs[limb_idx] >> bit_idx) & 1 == 1 ? 1 : 0
+      else
+        # Negative: two's complement is ~(|self| - 1)
+        # bit of -x = 1 - bit_of(|x| - 1, index)
+        # Compute (|self| - 1) bit without allocating a full BigInt
+        # Walk limbs to find (magnitude - 1) at this position
+        n = abs_size
+        return 1 if limb_idx >= n # infinite sign extension
+
+        # Compute the borrow chain for magnitude - 1
+        borrow = 1_u64
+        limb_val = 0_u64
+        i = 0
+        while i <= limb_idx
+          diff = @limbs[i].to_u128 &- borrow.to_u128
+          limb_val = diff.to_u64!
+          borrow = (diff >> 127) != 0 ? 1_u64 : 0_u64
+          i += 1
+        end
+        # bit of (|self| - 1) at this position
+        orig_bit = (limb_val >> bit_idx) & 1
+        # Complement it
+        orig_bit == 1 ? 0 : 1
+      end
+    end
+
+    def bit_length : Int32
+      return 1 if zero?
+      n = abs_size
+      top = @limbs[n - 1]
+      (n - 1) * 64 + (64 - top.leading_zeros_count.to_i32)
+    end
+
+    def popcount : Int
+      return 0 if zero?
+      # For negative numbers, two's complement has infinite 1-bits
+      return UInt64::MAX if negative?
+      count = 0
+      abs_size.times { |i| count += @limbs[i].popcount }
+      count
+    end
+
+    def trailing_zeros_count : Int
+      return 0 if zero?
+      n = abs_size
+      i = 0
+      while i < n
+        if @limbs[i] != 0
+          return i * 64 + @limbs[i].trailing_zeros_count.to_i32
+        end
+        i += 1
+      end
+      0
+    end
+
+    def &(other : BigInt) : BigInt
+      bitwise_op(other, :and)
+    end
+
+    def &(other : Int) : BigInt
+      self & BigInt.new(other)
+    end
+
+    def |(other : BigInt) : BigInt
+      bitwise_op(other, :or)
+    end
+
+    def |(other : Int) : BigInt
+      self | BigInt.new(other)
+    end
+
+    def ^(other : BigInt) : BigInt
+      bitwise_op(other, :xor)
+    end
+
+    def ^(other : Int) : BigInt
+      self ^ BigInt.new(other)
+    end
+
+    # --- Number Theory ---
+
+    def gcd(other : BigInt) : BigInt
+      a = self.abs
+      b = other.abs
+      while !b.zero?
+        a, b = b, a % b
+      end
+      a
+    end
+
+    def gcd(other : Int) : Int
+      gcd(BigInt.new(other)).to_i64
+    end
+
+    def lcm(other : BigInt) : BigInt
+      return BigInt.new if zero? || other.zero?
+      g = gcd(other)
+      (self // g * other).abs
+    end
+
+    def lcm(other : Int) : BigInt
+      lcm(BigInt.new(other))
+    end
+
+    def factorial : BigInt
+      raise ArgumentError.new("Factorial of negative number") if negative?
+      n = to_i64
+      result = BigInt.new(1)
+      i = 2_i64
+      while i <= n
+        result = result * BigInt.new(i)
+        i += 1
+      end
+      result
+    end
+
+    def divisible_by?(number : BigInt) : Bool
+      (self % number).zero?
+    end
+
+    def divisible_by?(number : Int) : Bool
+      (self % number).zero?
+    end
+
     # --- Conversion ---
 
     def to_s : String
       to_s(10)
     end
 
-    def to_s(base : Int32) : String
+    def to_s(base : Int = 10, *, precision : Int = 1, upcase : Bool = false) : String
       String.build do |io|
-        to_s(io, base)
+        to_s(io, base, precision: precision, upcase: upcase)
       end
     end
 
@@ -369,32 +687,38 @@ module BigNumber
       to_s(io, 10)
     end
 
-    def to_s(io : IO, base : Int32) : Nil
+    def to_s(io : IO, base : Int = 10, *, precision : Int = 1, upcase : Bool = false) : Nil
       raise ArgumentError.new("Invalid base #{base}") unless 2 <= base <= 36
       if zero?
-        io << '0'
+        io << '-' if @size < 0 # -0 shouldn't happen but be safe
+        pad = Math.max(precision.to_i32, 1)
+        pad.times { io << '0' }
         return
       end
       io << '-' if negative?
 
       n = abs_size
-      # Work on a copy of the limbs
       tmp = Pointer(Limb).malloc(n)
       tmp.copy_from(@limbs, n)
       tmp_size = n
 
-      digits = [] of UInt8
+      raw_digits = [] of UInt8
       while tmp_size > 0
         rem = BigInt.limbs_div_rem_1(tmp, tmp, tmp_size, base.to_u64)
-        digits << rem.to_u8
-        # Shrink if top limb is now 0
+        raw_digits << rem.to_u8
         while tmp_size > 0 && tmp[tmp_size - 1] == 0
           tmp_size -= 1
         end
       end
 
-      digits.reverse_each do |d|
-        io << BigInt.digit_to_char(d)
+      # Pad with leading zeros to meet precision
+      while raw_digits.size < precision
+        raw_digits << 0_u8
+      end
+
+      raw_digits.reverse_each do |d|
+        c = BigInt.digit_to_char(d)
+        io << (upcase ? c.upcase : c)
       end
     end
 
@@ -402,43 +726,76 @@ module BigNumber
       to_s(io, 10)
     end
 
-    def to_i64 : Int64
-      if zero?
-        return 0_i64
-      end
-      n = abs_size
-      if n > 1
-        raise OverflowError.new("BigInt too large for Int64")
-      end
-      val = @limbs[0]
-      if negative?
-        if val > Int64::MAX.to_u64 + 1
-          raise OverflowError.new("BigInt too large for Int64")
-        end
-        -(val.to_i64!)
-      else
-        if val > Int64::MAX.to_u64
-          raise OverflowError.new("BigInt too large for Int64")
-        end
-        val.to_i64!
-      end
+    # --- Checked integer conversions ---
+
+    def to_i : Int32
+      to_i32
     end
 
-    def to_u64 : UInt64
-      raise OverflowError.new("Negative BigInt") if negative?
-      if zero?
-        return 0_u64
+    def to_i! : Int32
+      to_i32!
+    end
+
+    def to_u : UInt32
+      to_u32
+    end
+
+    def to_u! : UInt32
+      to_u32!
+    end
+
+    {% for info in [{Int8, "i8"}, {Int16, "i16"}, {Int32, "i32"}, {Int64, "i64"}, {Int128, "i128"}] %}
+      def to_{{info[1].id}} : {{info[0]}}
+        val = to_i128_internal
+        if val < {{info[0]}}::MIN.to_i128 || val > {{info[0]}}::MAX.to_i128
+          raise OverflowError.new("BigInt too large for {{info[0]}}")
+        end
+        val.to_{{info[1].id}}!
       end
-      if abs_size > 1
-        raise OverflowError.new("BigInt too large for UInt64")
+
+      def to_{{info[1].id}}! : {{info[0]}}
+        return {{info[0]}}.new(0) if zero?
+        val = @limbs[0].to_{{info[1].id}}!
+        negative? ? (0.to_{{info[1].id}}! &- val) : val
       end
-      @limbs[0]
+    {% end %}
+
+    {% for info in [{UInt8, "u8"}, {UInt16, "u16"}, {UInt32, "u32"}, {UInt64, "u64"}, {UInt128, "u128"}] %}
+      def to_{{info[1].id}} : {{info[0]}}
+        raise OverflowError.new("Negative BigInt") if negative?
+        val = to_u128_internal
+        if val > {{info[0]}}::MAX.to_u128
+          raise OverflowError.new("BigInt too large for {{info[0]}}")
+        end
+        val.to_{{info[1].id}}!
+      end
+
+      def to_{{info[1].id}}! : {{info[0]}}
+        return {{info[0]}}.new(0) if zero?
+        val = @limbs[0].to_{{info[1].id}}!
+        negative? ? (0.to_{{info[1].id}}! &- val) : val
+      end
+    {% end %}
+
+    def to_f : Float64
+      to_f64
+    end
+
+    def to_f! : Float64
+      to_f64
+    end
+
+    def to_f32 : Float32
+      to_f64.to_f32
+    end
+
+    def to_f32! : Float32
+      to_f64.to_f32
     end
 
     def to_f64 : Float64
       return 0.0 if zero?
       n = abs_size
-      # Accumulate from the top limb down
       result = 0.0
       i = n - 1
       while i >= 0
@@ -446,6 +803,57 @@ module BigNumber
         i -= 1
       end
       negative? ? -result : result
+    end
+
+    def to_f64! : Float64
+      to_f64
+    end
+
+    def to_big_i : BigInt
+      self
+    end
+
+    def digits(base : Int = 10) : Array(Int32)
+      raise ArgumentError.new("Can't request digits of negative number") if negative?
+      raise ArgumentError.new("Invalid base #{base}") unless base >= 2
+      return [0] if zero?
+
+      result = [] of Int32
+      tmp = dup_value
+      b = BigInt.new(base)
+      while !tmp.zero?
+        q, r = tmp.tdiv_rem(b)
+        result << r.to_i32
+        tmp = q
+      end
+      result
+    end
+
+    # --- Misc ---
+
+    def next_power_of_two : BigInt
+      raise ArgumentError.new("Expected non-negative number") if negative?
+      return BigInt.new(1) if zero?
+      # If already a power of 2, return self
+      bl = bit_length
+      if popcount == 1
+        return dup_value
+      end
+      BigInt.new(1) << bl
+    end
+
+    def factor_by(number : Int) : {BigInt, UInt64}
+      raise ArgumentError.new("Can't factor by #{number}") if number <= 1
+      d = BigInt.new(number)
+      count = 0_u64
+      current = self.abs
+      while !current.zero?
+        q, r = current.tdiv_rem(d)
+        break unless r.zero?
+        current = q
+        count += 1
+      end
+      {current, count}
     end
 
     def clone : BigInt
@@ -501,6 +909,136 @@ module BigNumber
     end
 
     # --- Private ---
+
+    private def to_i128_internal : Int128
+      return 0_i128 if zero?
+      n = abs_size
+      val = @limbs[0].to_u128
+      val |= @limbs[1].to_u128 << 64 if n >= 2
+      negative? ? -(val.to_i128!) : val.to_i128!
+    end
+
+    private def to_u128_internal : UInt128
+      return 0_u128 if zero?
+      n = abs_size
+      val = @limbs[0].to_u128
+      val |= @limbs[1].to_u128 << 64 if n >= 2
+      val
+    end
+
+    # Bitwise operation on two BigInts with two's complement semantics.
+    # For negative x, two's complement is ~(|x| - 1).
+    # We case-split on signs to avoid allocating two's complement arrays.
+    private def bitwise_op(other : BigInt, op : Symbol) : BigInt
+      # Both positive: direct limb-by-limb
+      if !negative? && !other.negative?
+        return bitwise_pos_pos(other, op)
+      end
+
+      # Use the identity: -x in two's complement = ~(x-1)
+      # Convert to two's complement, apply op, convert back.
+      #
+      # Result sign (from infinite sign bits):
+      # AND: neg only if both neg
+      # OR:  neg if either neg
+      # XOR: neg if exactly one neg
+      result_negative = case op
+                         when :and then negative? && other.negative?
+                         when :or  then negative? || other.negative?
+                         when :xor then negative? ^ other.negative?
+                         else           false
+                         end
+
+      an = abs_size
+      bn = other.abs_size
+      max_n = Math.max(an, bn) + 1 # +1 for possible carry
+
+      # Build two's complement limb arrays for each operand
+      a_tc = Pointer(Limb).malloc(max_n)
+      b_tc = Pointer(Limb).malloc(max_n)
+
+      fill_twos_complement(a_tc, max_n)
+      other.fill_twos_complement(b_tc, max_n)
+
+      # Apply operation limb-by-limb
+      r_tc = Pointer(Limb).malloc(max_n)
+      max_n.times do |i|
+        r_tc[i] = case op
+                  when :and then a_tc[i] & b_tc[i]
+                  when :or  then a_tc[i] | b_tc[i]
+                  when :xor then a_tc[i] ^ b_tc[i]
+                  else           0_u64
+                  end
+      end
+
+      # Convert result back from two's complement
+      result = BigInt.new
+      if result_negative
+        # Result is negative: r_tc is two's complement of magnitude
+        # magnitude = ~r_tc + 1 (negate two's complement)
+        max_n.times { |i| r_tc[i] = ~r_tc[i] }
+        # Add 1
+        carry = 1_u64
+        max_n.times do |i|
+          sum = r_tc[i].to_u128 &+ carry.to_u128
+          r_tc[i] = sum.to_u64!
+          carry = (sum >> 64).to_u64!
+        end
+        result.ensure_capacity(max_n)
+        result.@limbs.copy_from(r_tc, max_n)
+        result.set_size(-max_n)
+        result.normalize!
+      else
+        result.ensure_capacity(max_n)
+        result.@limbs.copy_from(r_tc, max_n)
+        result.set_size(max_n)
+        result.normalize!
+      end
+      result
+    end
+
+    private def bitwise_pos_pos(other : BigInt, op : Symbol) : BigInt
+      an = abs_size
+      bn = other.abs_size
+      max_n = Math.max(an, bn)
+      result = BigInt.new
+      result.ensure_capacity(max_n)
+      max_n.times do |i|
+        a_limb = i < an ? @limbs[i] : 0_u64
+        b_limb = i < bn ? other.@limbs[i] : 0_u64
+        result.@limbs[i] = case op
+                           when :and then a_limb & b_limb
+                           when :or  then a_limb | b_limb
+                           when :xor then a_limb ^ b_limb
+                           else           0_u64
+                           end
+      end
+      result.set_size(max_n)
+      result.normalize!
+      result
+    end
+
+    # Fill buffer with two's complement representation of self, padded to n limbs.
+    # Positive: just copy magnitude, zero-extend.
+    # Negative: ~(|self| - 1), sign-extend with 0xFF..FF.
+    protected def fill_twos_complement(buf : Pointer(Limb), n : Int32)
+      an = abs_size
+      if !negative?
+        an.times { |i| buf[i] = @limbs[i] }
+        (an...n).each { |i| buf[i] = 0_u64 }
+      else
+        # Compute ~(magnitude - 1)
+        # First: magnitude - 1
+        borrow = 1_u64
+        an.times do |i|
+          diff = @limbs[i].to_u128 &- borrow.to_u128
+          buf[i] = ~diff.to_u64!
+          borrow = (diff >> 127) != 0 ? 1_u64 : 0_u64
+        end
+        # Sign extend
+        (an...n).each { |i| buf[i] = Limb::MAX }
+      end
+    end
 
     private def set_from_unsigned(mag : UInt128)
       lo = mag.to_u64!
