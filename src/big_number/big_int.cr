@@ -297,6 +297,25 @@ module BigNumber
     end
 
     def *(other : Int) : BigInt
+      return BigInt.new if zero? || other == 0
+      # Fast path: multiply by single limb without constructing a temporary BigInt
+      neg = (negative?) ^ (other < 0)
+      mag = other < 0 ? (0_u128 &- other.to_u128!) : other.to_u128
+      lo = mag.to_u64!
+      hi = (mag >> 64).to_u64!
+      if hi == 0
+        n = abs_size
+        result = BigInt.new(capacity: n + 1)
+        carry = BigInt.limbs_mul_1(result.@limbs, @limbs, n, lo)
+        if carry != 0
+          result.@limbs[n] = carry
+          result.set_size(n + 1)
+        else
+          result.set_size(n)
+        end
+        result.set_size(-result.@size) if neg
+        return result
+      end
       self * BigInt.new(other)
     end
 
