@@ -58,4 +58,9 @@ sizes.each do |label, digits|
       x.report("stdlib    div") { theirs // theirs_d }
     end
   end
+
+  Benchmark.ips do |x|
+    x.report("BigNumber to_s") { ours.to_s }
+    x.report("stdlib    to_s") { theirs.to_s }
+  end
 end
