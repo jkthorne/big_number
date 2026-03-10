@@ -2232,13 +2232,17 @@ module BigNumber
         if c != 0; c2[c2n] = c; c2n += 1; end
       end
       while c2n > 1 && c2[c2n - 1] == 0; c2n -= 1; end
-      limbs_rshift(c2, c2, c2n, 1)
-      while c2n > 1 && c2[c2n - 1] == 0; c2n -= 1; end
+      limbs_rshift(c2, c2, c2n, 1) if c2n > 0
       # Subtract w0
-      limbs_sub(c2, c2, c2n, w0, w0n) if w0n > 0
-      while c2n > 1 && c2[c2n - 1] == 0; c2n -= 1; end
+      if w0n > 0
+        c2n = Math.max(c2n, w0n) if w0n > c2n
+        limbs_sub(c2, c2, c2n, w0, w0n)
+      end
       # Subtract winf
-      limbs_sub(c2, c2, c2n, winf, winfn) if winfn > 0
+      if winfn > 0
+        c2n = Math.max(c2n, winfn) if winfn > c2n
+        limbs_sub(c2, c2, c2n, winf, winfn)
+      end
       while c2n > 1 && c2[c2n - 1] == 0; c2n -= 1; end
 
       # --- t = (w1 - wm1) / 2 = c1 + c3 (always non-negative) ---
@@ -2263,33 +2267,37 @@ module BigNumber
       while tn > 1 && t[tn - 1] == 0; tn -= 1; end
 
       # --- c3 = ((w2 - w0) / 2 - t - 2*c2 - 8*winf) / 3 ---
-      # Compute into w2 buffer (safe to overwrite now)
+      # Compute into w2 buffer (safe to overwrite now).
+      # IMPORTANT: Do not trim c3n between operations. Aggressive trimming can make
+      # c3n < subtrahend size, causing limbs_sub to read beyond valid data.
       c3 = w2
       c3n = w2n
       # c3 = w2 - w0
-      limbs_sub(c3, c3, c3n, w0, w0n) if w0n > 0
-      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      limbs_sub(c3, c3, c3n, w0, w0n) if w0n > 0 && c3n >= w0n
       # c3 = c3 / 2
-      limbs_rshift(c3, c3, c3n, 1)
-      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      limbs_rshift(c3, c3, c3n, 1) if c3n > 0
       # c3 -= t
-      limbs_sub(c3, c3, c3n, t, tn) if tn > 0
-      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      if tn > 0
+        c3n = Math.max(c3n, tn) if tn > c3n  # extend with existing zeros
+        limbs_sub(c3, c3, c3n, t, tn)
+      end
       # c3 -= 2*c2
-      limbs_sub(c3, c3, c3n, c2, c2n) if c2n > 0
-      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
-      limbs_sub(c3, c3, c3n, c2, c2n) if c2n > 0
-      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
-      # c3 -= 8*winf (subtract winf 8 times, or shift+sub)
+      if c2n > 0
+        c3n = Math.max(c3n, c2n) if c2n > c3n
+        limbs_sub(c3, c3, c3n, c2, c2n)
+        limbs_sub(c3, c3, c3n, c2, c2n)
+      end
+      # c3 -= 8*winf
       if winfn > 0
-        # Compute 8*winf into a temp
         tmp8 = Pointer(Limb).malloc(winfn + 1)
         top = limbs_lshift(tmp8, winf, winfn, 3)
         tmp8n = winfn
         if top != 0; tmp8[tmp8n] = top; tmp8n += 1; end
+        c3n = Math.max(c3n, tmp8n) if tmp8n > c3n
         limbs_sub(c3, c3, c3n, tmp8, tmp8n)
-        while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
       end
+      # Trim before dividing by 3
+      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
       # c3 /= 3
       limbs_div_rem_1(c3, c3, c3n, 3_u64)
       while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
@@ -2297,7 +2305,10 @@ module BigNumber
       # --- c1 = t - c3 ---
       c1 = t  # reuse t buffer (t = c1 + c3, so c1 = t - c3)
       c1n = tn
-      limbs_sub(c1, c1, c1n, c3, c3n) if c3n > 0
+      if c3n > 0
+        c1n = Math.max(c1n, c3n) if c3n > c1n
+        limbs_sub(c1, c1, c1n, c3, c3n)
+      end
       while c1n > 1 && c1[c1n - 1] == 0; c1n -= 1; end
 
       # --- Recompose: result = c0 + c1*B^k + c2*B^(2k) + c3*B^(3k) + c4*B^(4k) ---
