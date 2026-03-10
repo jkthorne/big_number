@@ -1937,9 +1937,14 @@ module BigNumber
 
       # --- Evaluate at point 0: a(0) = a0, b(0) = b0 ---
       # W(0) = a0 * b0
-      toom3_mul_recurse(w0, a0, a0n, b0, b0n, rec_scratch)
-      w0n = a0n + b0n
-      while w0n > 0 && w0[w0n - 1] == 0; w0n -= 1; end
+      if a0n > 0 && b0n > 0
+        toom3_mul_recurse(w0, a0, a0n, b0, b0n, rec_scratch)
+        w0n = a0n + b0n
+        while w0n > 0 && w0[w0n - 1] == 0; w0n -= 1; end
+      else
+        w0[0] = 0_u64
+        w0n = 0
+      end
 
       # --- Evaluate at point ∞: a(∞) = a2, b(∞) = b2 ---
       # W(∞) = a2 * b2
