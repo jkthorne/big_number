@@ -1,4 +1,32 @@
 struct Int
+  def to_big_r : BigNumber::BigRational
+    BigNumber::BigRational.new(self)
+  end
+
+  def +(other : BigNumber::BigRational) : BigNumber::BigRational
+    BigNumber::BigRational.new(self) + other
+  end
+
+  def -(other : BigNumber::BigRational) : BigNumber::BigRational
+    BigNumber::BigRational.new(self) - other
+  end
+
+  def *(other : BigNumber::BigRational) : BigNumber::BigRational
+    BigNumber::BigRational.new(self) * other
+  end
+
+  def /(other : BigNumber::BigRational) : BigNumber::BigRational
+    BigNumber::BigRational.new(self) / other
+  end
+
+  def <=>(other : BigNumber::BigRational) : Int32
+    -(other <=> self)
+  end
+
+  def ==(other : BigNumber::BigRational) : Bool
+    other == self
+  end
+
   def +(other : BigNumber::BigInt) : BigNumber::BigInt
     BigNumber::BigInt.new(self) + other
   end
@@ -49,6 +77,10 @@ struct Int
 end
 
 struct Float
+  def to_big_r : BigNumber::BigRational
+    BigNumber::BigRational.new(self)
+  end
+
   def <=>(other : BigNumber::BigInt) : Int32?
     return nil if nan?
     BigNumber::BigInt.new(self) <=> other
@@ -62,6 +94,10 @@ end
 class String
   def to_big_i(base : Int32 = 10) : BigNumber::BigInt
     BigNumber::BigInt.new(self, base)
+  end
+
+  def to_big_r : BigNumber::BigRational
+    BigNumber::BigRational.new(self)
   end
 end
 
