@@ -703,6 +703,56 @@ describe BigNumber::BigInt do
     BI.new(2).pow_mod(10, BI.new(1000)).to_s.should eq("24")
   end
 
+  # --- root(n) ---
+
+  it "root cube roots" do
+    BI.new(0).root(3).to_s.should eq("0")
+    BI.new(1).root(3).to_s.should eq("1")
+    BI.new(8).root(3).to_s.should eq("2")
+    BI.new(27).root(3).to_s.should eq("3")
+    BI.new(64).root(3).to_s.should eq("4")
+    BI.new(1000).root(3).to_s.should eq("10")
+  end
+
+  it "root n=1 identity" do
+    BI.new(42).root(1).to_s.should eq("42")
+  end
+
+  it "root n=2 matches sqrt" do
+    rng = Random.new(62)
+    100.times do
+      s = random_decimal(rng, max_digits: 30)
+      n = BI.new(s).abs
+      n.root(2).to_s.should eq(n.sqrt.to_s)
+    end
+  end
+
+  it "root negative odd roots" do
+    BI.new(-8).root(3).to_s.should eq("-2")
+    BI.new(-27).root(3).to_s.should eq("-3")
+  end
+
+  it "root negative even root raises" do
+    expect_raises(ArgumentError) { BI.new(-4).root(2) }
+  end
+
+  it "root zeroth root raises" do
+    expect_raises(ArgumentError) { BI.new(8).root(0) }
+  end
+
+  it "root invariant r^n ≤ val < (r+1)^n" do
+    rng = Random.new(63)
+    100.times do
+      s = random_decimal(rng, max_digits: 30)
+      val = BI.new(s).abs
+      [3, 4, 5].each do |n|
+        r = val.root(n)
+        (r ** n <= val).should be_true, "r^n > val for val=#{val}, n=#{n}"
+        ((r + BI.new(1)) ** n > val).should be_true, "(r+1)^n ≤ val for val=#{val}, n=#{n}"
+      end
+    end
+  end
+
   # --- sqrt ---
 
   it "sqrt perfect squares" do

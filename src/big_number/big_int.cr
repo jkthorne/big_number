@@ -745,6 +745,30 @@ module BigNumber
       (self % number).zero?
     end
 
+    def root(n : Int) : BigInt
+      raise ArgumentError.new("Zeroth root is undefined") if n == 0
+      if negative?
+        raise ArgumentError.new("Even root of negative number") if n.even?
+        return -((-self).root(n))
+      end
+      return BigInt.new if zero?
+      return dup_value if n == 1
+      return sqrt if n == 2
+
+      # Newton's method for integer nth root
+      # x_{k+1} = ((n-1)*x_k + self // x_k^(n-1)) // n
+      bn = BigInt.new(n)
+      bn1 = BigInt.new(n - 1)
+      x = BigInt.new(1) << ((bit_length + n - 1) // n)
+      loop do
+        xn1 = x ** (n - 1)
+        x1 = (bn1 * x + self // xn1) // bn
+        break if x1 >= x
+        x = x1
+      end
+      x
+    end
+
     def sqrt : BigInt
       raise ArgumentError.new("Square root of negative number") if negative?
       return BigInt.new if zero?
