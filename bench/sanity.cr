@@ -5,7 +5,7 @@ require "../src/big_number"
 puts "BigNumber vs stdlib BigInt (libgmp)"
 puts "=" * 50
 
-sizes = {1 => 19, 10 => 190, 100 => 1900, 1000 => 19000}
+sizes = {1 => 19, 10 => 190, 30 => 570, 50 => 950, 100 => 1900, 1000 => 19000}
 
 sizes.each do |label, digits|
   str = "9" * digits
@@ -24,7 +24,6 @@ sizes.each do |label, digits|
     x.report("stdlib    mul") { theirs * theirs }
   end
 
-  # Only bench division for smaller sizes (avoid very slow schoolbook div on huge numbers)
   if label <= 100
     divisor_str = "7" * (digits // 2 + 1)
     ours_d = BigNumber::BigInt.new(divisor_str)

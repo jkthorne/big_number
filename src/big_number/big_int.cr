@@ -193,6 +193,15 @@ module BigNumber
       return dup_value if other.zero?
       return other.dup_value if zero?
 
+      # Single-limb fast path
+      if @size.abs == 1 && other.@size.abs == 1
+        a = @limbs[0].to_i128
+        a = -a if @size < 0
+        b = other.@limbs[0].to_i128
+        b = -b if other.@size < 0
+        return BigInt.new(a + b)
+      end
+
       if (@size ^ other.@size) >= 0
         # Same sign: add magnitudes, keep sign
         add_magnitudes(other)
@@ -214,6 +223,15 @@ module BigNumber
         return result
       end
 
+      # Single-limb fast path
+      if @size.abs == 1 && other.@size.abs == 1
+        a = @limbs[0].to_i128
+        a = -a if @size < 0
+        b = other.@limbs[0].to_i128
+        b = -b if other.@size < 0
+        return BigInt.new(a - b)
+      end
+
       if (@size ^ other.@size) < 0
         # Different signs: add magnitudes, keep self's sign
         add_magnitudes(other)
@@ -231,6 +249,27 @@ module BigNumber
 
     def *(other : BigInt) : BigInt
       return BigInt.new if zero? || other.zero?
+
+      # Single-limb fast path: use UInt128 multiply
+      if @size.abs == 1 && other.@size.abs == 1
+        prod = @limbs[0].to_u128 &* other.@limbs[0].to_u128
+        result = BigInt.new
+        if prod <= UInt64::MAX.to_u128
+          result.ensure_capacity(1)
+          result.@limbs[0] = prod.to_u64!
+          result.set_size(1)
+        else
+          result.ensure_capacity(2)
+          result.@limbs[0] = prod.to_u64!
+          result.@limbs[1] = (prod >> 64).to_u64!
+          result.set_size(2)
+        end
+        if (@size < 0) ^ (other.@size < 0)
+          result.set_size(-result.@size)
+        end
+        return result
+      end
+
       an = abs_size
       bn = other.abs_size
       rn = an + bn
@@ -1128,15 +1167,18 @@ module BigNumber
       carry = 0_u64
       i = 0
       while i < bn
-        sum = ap[i].to_u128 &+ bp[i].to_u128 &+ carry.to_u128
-        rp[i] = sum.to_u64!
-        carry = (sum >> 64).to_u64!
+        s = ap[i] &+ bp[i]
+        c1 = s < ap[i] ? 1_u64 : 0_u64
+        s2 = s &+ carry
+        c2 = s2 < s ? 1_u64 : 0_u64
+        rp[i] = s2
+        carry = c1 &+ c2
         i += 1
       end
       while i < an
-        sum = ap[i].to_u128 &+ carry.to_u128
-        rp[i] = sum.to_u64!
-        carry = (sum >> 64).to_u64!
+        s = ap[i] &+ carry
+        carry = s < ap[i] ? 1_u64 : 0_u64
+        rp[i] = s
         i += 1
       end
       carry
@@ -1147,16 +1189,17 @@ module BigNumber
       borrow = 0_u64
       i = 0
       while i < bn
-        # Use u128 to detect underflow
-        diff = ap[i].to_u128 &- bp[i].to_u128 &- borrow.to_u128
-        rp[i] = diff.to_u64!
-        borrow = (diff >> 127) != 0 ? 1_u64 : 0_u64 # high bit set means underflow
+        b1 = ap[i] < bp[i] ? 1_u64 : 0_u64
+        d = ap[i] &- bp[i]
+        b2 = d < borrow ? 1_u64 : 0_u64
+        rp[i] = d &- borrow
+        borrow = b1 &+ b2
         i += 1
       end
       while i < an
-        diff = ap[i].to_u128 &- borrow.to_u128
-        rp[i] = diff.to_u64!
-        borrow = (diff >> 127) != 0 ? 1_u64 : 0_u64
+        b = ap[i] < borrow ? 1_u64 : 0_u64
+        rp[i] = ap[i] &- borrow
+        borrow = b
         i += 1
       end
       borrow
@@ -1220,10 +1263,21 @@ module BigNumber
       borrow.to_u64!
     end
 
-    # Schoolbook multiply: rp[0..an+bn-1] = ap[0..an-1] * bp[0..bn-1]. an >= bn > 0.
-    # rp must not alias ap or bp.
+    KARATSUBA_THRESHOLD = 32
+
+    # Top-level multiply dispatch. an >= bn > 0. rp must not alias ap or bp.
     protected def self.limbs_mul(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32)
-      # Zero the result
+      if bn < KARATSUBA_THRESHOLD
+        limbs_mul_schoolbook(rp, ap, an, bp, bn)
+      else
+        # Allocate scratch space for Karatsuba
+        scratch = Pointer(Limb).malloc(karatsuba_scratch_size(an))
+        limbs_mul_karatsuba(rp, ap, an, bp, bn, scratch)
+      end
+    end
+
+    # Schoolbook multiply: O(an*bn).
+    protected def self.limbs_mul_schoolbook(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32)
       (an + bn).times { |i| rp[i] = 0_u64 }
       i = 0
       while i < bn
@@ -1231,6 +1285,146 @@ module BigNumber
         rp[i + an] = carry
         i += 1
       end
+    end
+
+    # Karatsuba multiply: O(n^1.585).
+    # rp must have space for an+bn limbs. scratch must have karatsuba_scratch_size(an) limbs.
+    protected def self.limbs_mul_karatsuba(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
+      # Fall back to schoolbook for small or unbalanced operands
+      if bn < KARATSUBA_THRESHOLD
+        limbs_mul_schoolbook(rp, ap, an, bp, bn)
+        return
+      end
+
+      # If very unbalanced (an >= 2*bn), slice a into chunks and multiply piecewise
+      if an >= 2 * bn
+        limbs_mul_unbalanced(rp, ap, an, bp, bn, scratch)
+        return
+      end
+
+      # Split at midpoint: m = bn / 2
+      # a = a1 * B^m + a0,  b = b1 * B^m + b0
+      m = bn >> 1
+      a0 = ap;         a0n = m
+      a1 = ap + m;     a1n = an - m
+      b0 = bp;         b0n = m
+      b1 = bp + m;     b1n = bn - m
+
+      # z0 = a0 * b0  (stored in rp[0..2m-1])
+      limbs_mul_karatsuba(rp, a0, a0n, b0, b0n, scratch)
+      # Zero upper part of rp that we'll accumulate into
+      (an + bn - 2 * m).times { |i| rp[2 * m + i] = 0_u64 }
+
+      # z2 = a1 * b1  (stored in rp[2m..an+bn-1])
+      limbs_mul_karatsuba(rp + 2 * m, a1, a1n, b1, b1n, scratch)
+
+      # z1 = (a0 + a1) * (b0 + b1) - z0 - z2
+      # Compute |a0 + a1| and |b0 + b1| in scratch
+      t1 = scratch
+      t1n = Math.max(a0n, a1n) + 1
+      t2 = scratch + t1n
+      t2n = Math.max(b0n, b1n) + 1
+
+      # a0 + a1
+      if a0n >= a1n
+        t1[a0n] = limbs_add(t1, a0, a0n, a1, a1n)
+      else
+        t1[a1n] = limbs_add(t1, a1, a1n, a0, a0n)
+      end
+      # Trim leading zero
+      actual_t1n = t1n
+      while actual_t1n > 0 && t1[actual_t1n - 1] == 0
+        actual_t1n -= 1
+      end
+      actual_t1n = 1 if actual_t1n == 0
+
+      # b0 + b1
+      if b0n >= b1n
+        t2[b0n] = limbs_add(t2, b0, b0n, b1, b1n)
+      else
+        t2[b1n] = limbs_add(t2, b1, b1n, b0, b0n)
+      end
+      actual_t2n = t2n
+      while actual_t2n > 0 && t2[actual_t2n - 1] == 0
+        actual_t2n -= 1
+      end
+      actual_t2n = 1 if actual_t2n == 0
+
+      # t3 = (a0+a1) * (b0+b1) in scratch after t1 and t2
+      t3 = scratch + t1n + t2n
+      t3n = actual_t1n + actual_t2n
+      next_scratch = t3 + t3n
+      if actual_t1n >= actual_t2n
+        limbs_mul_karatsuba(t3, t1, actual_t1n, t2, actual_t2n, next_scratch)
+      else
+        limbs_mul_karatsuba(t3, t2, actual_t2n, t1, actual_t1n, next_scratch)
+      end
+      # Trim
+      while t3n > 0 && t3[t3n - 1] == 0
+        t3n -= 1
+      end
+
+      # t3 -= z0 (rp[0..2m-1])
+      z0n = a0n + b0n
+      limbs_sub(t3, t3, t3n, rp, z0n) if z0n > 0 && t3n >= z0n
+
+      # t3 -= z2 (rp[2m..])
+      z2n = a1n + b1n
+      while z2n > 0 && rp[2 * m + z2n - 1] == 0
+        z2n -= 1
+      end
+      limbs_sub(t3, t3, t3n, rp + 2 * m, z2n) if z2n > 0 && t3n >= z2n
+
+      # Trim t3 again
+      while t3n > 0 && t3[t3n - 1] == 0
+        t3n -= 1
+      end
+
+      # Add t3 at position m in rp
+      if t3n > 0
+        carry = limbs_add(rp + m, rp + m, an + bn - m, t3, t3n)
+        # carry should be absorbed since result fits in an+bn limbs
+      end
+    end
+
+    # Handle unbalanced multiply: an >= 2*bn. Slice a into bn-sized chunks.
+    protected def self.limbs_mul_unbalanced(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
+      # Zero the result
+      (an + bn).times { |i| rp[i] = 0_u64 }
+
+      # Temporary buffer for each chunk product
+      tmp = Pointer(Limb).malloc(2 * bn)
+
+      offset = 0
+      remaining = an
+      while remaining > 0
+        chunk = Math.min(remaining, bn)
+        if chunk >= bn
+          limbs_mul_karatsuba(tmp, ap + offset, chunk, bp, bn, scratch)
+        else
+          # Last chunk may be smaller
+          if chunk >= bn
+            limbs_mul_karatsuba(tmp, ap + offset, chunk, bp, bn, scratch)
+          else
+            # smaller * larger: swap if needed
+            if chunk >= bn
+              limbs_mul_karatsuba(tmp, ap + offset, chunk, bp, bn, scratch)
+            else
+              limbs_mul_karatsuba(tmp, bp, bn, ap + offset, chunk, scratch)
+            end
+          end
+        end
+        # Add tmp to rp at offset
+        product_size = chunk + bn
+        carry = limbs_add(rp + offset, rp + offset, an + bn - offset, tmp, product_size)
+        offset += chunk
+        remaining -= chunk
+      end
+    end
+
+    protected def self.karatsuba_scratch_size(n : Int32) : Int32
+      # Conservative estimate: each level needs ~4n, with log2(n/threshold) levels
+      n * 8 + 64
     end
 
     # Divide limb array by a single limb. Returns remainder.
