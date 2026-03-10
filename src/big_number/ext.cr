@@ -1,6 +1,34 @@
 struct Int
+  def to_big_f(*, precision : Int32 = BigNumber::BigFloat.default_precision) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self, precision: precision)
+  end
+
   def to_big_r : BigNumber::BigRational
     BigNumber::BigRational.new(self)
+  end
+
+  def +(other : BigNumber::BigFloat) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self) + other
+  end
+
+  def -(other : BigNumber::BigFloat) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self) - other
+  end
+
+  def *(other : BigNumber::BigFloat) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self) * other
+  end
+
+  def /(other : BigNumber::BigFloat) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self) / other
+  end
+
+  def <=>(other : BigNumber::BigFloat) : Int32
+    -(other <=> self)
+  end
+
+  def ==(other : BigNumber::BigFloat) : Bool
+    other == self
   end
 
   def +(other : BigNumber::BigRational) : BigNumber::BigRational
@@ -77,6 +105,31 @@ struct Int
 end
 
 struct Float
+  def to_big_f(*, precision : Int32 = BigNumber::BigFloat.default_precision) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self.to_f64, precision: precision)
+  end
+
+  def +(other : BigNumber::BigFloat) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self.to_f64) + other
+  end
+
+  def -(other : BigNumber::BigFloat) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self.to_f64) - other
+  end
+
+  def *(other : BigNumber::BigFloat) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self.to_f64) * other
+  end
+
+  def /(other : BigNumber::BigFloat) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self.to_f64) / other
+  end
+
+  def <=>(other : BigNumber::BigFloat) : Int32?
+    return nil if nan?
+    -(other <=> self)
+  end
+
   def to_big_r : BigNumber::BigRational
     BigNumber::BigRational.new(self)
   end
@@ -92,6 +145,10 @@ struct Float
 end
 
 class String
+  def to_big_f(*, precision : Int32 = BigNumber::BigFloat.default_precision) : BigNumber::BigFloat
+    BigNumber::BigFloat.new(self, precision: precision)
+  end
+
   def to_big_i(base : Int32 = 10) : BigNumber::BigInt
     BigNumber::BigInt.new(self, base)
   end
