@@ -654,6 +654,61 @@ describe BigNumber::BigInt do
       ours.should eq(theirs), "bit_length failed: #{a_str}"
     end
   end
+
+  # === Step 2b: Missing Features ===
+
+  # --- to_bytes / from_bytes ---
+
+  it "to_bytes known vectors" do
+    BI.new(0).to_bytes.should eq(Bytes[0])
+    BI.new(1).to_bytes.should eq(Bytes[1])
+    BI.new(255).to_bytes.should eq(Bytes[255])
+    BI.new(256).to_bytes.should eq(Bytes[1, 0])
+    BI.new(65535).to_bytes.should eq(Bytes[255, 255])
+    BI.new(65536).to_bytes.should eq(Bytes[1, 0, 0])
+  end
+
+  it "to_bytes little-endian" do
+    BI.new(256).to_bytes(big_endian: false).should eq(Bytes[0, 1])
+  end
+
+  it "to_bytes negative raises" do
+    expect_raises(ArgumentError) { BI.new(-1).to_bytes }
+  end
+
+  it "from_bytes known vectors" do
+    BI.from_bytes(Bytes[0]).to_s.should eq("0")
+    BI.from_bytes(Bytes[1]).to_s.should eq("1")
+    BI.from_bytes(Bytes[1, 0]).to_s.should eq("256")
+    BI.from_bytes(Bytes[255, 255]).to_s.should eq("65535")
+  end
+
+  it "from_bytes little-endian" do
+    BI.from_bytes(Bytes[0, 1], big_endian: false).to_s.should eq("256")
+  end
+
+  it "to_bytes/from_bytes round-trip fuzz" do
+    rng = Random.new(60)
+    500.times do
+      s = random_decimal(rng, max_digits: 50)
+      val = BI.new(s).abs
+      bytes_be = val.to_bytes(big_endian: true)
+      bytes_le = val.to_bytes(big_endian: false)
+      BI.from_bytes(bytes_be, big_endian: true).to_s.should eq(val.to_s), "round-trip BE failed: #{val}"
+      BI.from_bytes(bytes_le, big_endian: false).to_s.should eq(val.to_s), "round-trip LE failed: #{val}"
+    end
+  end
+
+  it "to_bytes/from_bytes at limb boundaries" do
+    # Exactly 1 limb (8 bytes)
+    val = BI.new(UInt64::MAX)
+    rt = BI.from_bytes(val.to_bytes)
+    rt.to_s.should eq(val.to_s)
+    # 2 limbs
+    val2 = BI.new(UInt64::MAX) * BI.new(256) + BI.new(1)
+    rt2 = BI.from_bytes(val2.to_bytes)
+    rt2.to_s.should eq(val2.to_s)
+  end
 end
 
 # --- Helpers ---

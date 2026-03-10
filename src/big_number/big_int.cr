@@ -712,6 +712,82 @@ module BigNumber
 
     # --- Conversion ---
 
+    def to_bytes(big_endian : Bool = true) : Bytes
+      raise ArgumentError.new("Cannot convert negative BigInt to bytes") if negative?
+      if zero?
+        return Bytes.new(1, 0_u8)
+      end
+
+      n = abs_size
+      # Total bytes needed
+      top_limb = @limbs[n - 1]
+      top_bytes = (64 - top_limb.leading_zeros_count.to_i32 + 7) // 8
+      total = (n - 1) * 8 + top_bytes
+      bytes = Bytes.new(total)
+
+      # Write in little-endian limb order first, then reverse if big_endian
+      pos = 0
+      (n - 1).times do |i|
+        limb = @limbs[i]
+        8.times do |b|
+          bytes[pos] = (limb >> (b * 8)).to_u8!
+          pos += 1
+        end
+      end
+      # Top limb (only top_bytes bytes)
+      top_bytes.times do |b|
+        bytes[pos] = (top_limb >> (b * 8)).to_u8!
+        pos += 1
+      end
+
+      if big_endian
+        bytes.reverse!
+      end
+      bytes
+    end
+
+    def self.from_bytes(bytes : Bytes, big_endian : Bool = true) : BigInt
+      # Strip leading zeros
+      start = 0
+      if big_endian
+        while start < bytes.size - 1 && bytes[start] == 0
+          start += 1
+        end
+      else
+        last = bytes.size - 1
+        while last > 0 && bytes[last] == 0
+          last -= 1
+        end
+        # Work with a trimmed slice
+        bytes = bytes[0..last]
+        start = 0
+      end
+
+      effective = big_endian ? bytes[start..] : bytes[start..]
+      return BigInt.new if effective.size == 1 && effective[0] == 0
+
+      n_limbs = (effective.size + 7) // 8
+      result = BigInt.new
+      result.ensure_capacity(n_limbs)
+
+      n_limbs.times do |li|
+        limb = 0_u64
+        8.times do |b|
+          byte_idx = if big_endian
+                       effective.size - 1 - (li * 8 + b)
+                     else
+                       li * 8 + b
+                     end
+          break if byte_idx < 0 || byte_idx >= effective.size
+          limb |= effective[byte_idx].to_u64 << (b * 8)
+        end
+        result.@limbs[li] = limb
+      end
+      result.set_size(n_limbs)
+      result.normalize!
+      result
+    end
+
     def to_s : String
       to_s(10)
     end
