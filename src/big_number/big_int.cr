@@ -1002,6 +1002,7 @@ module BigNumber
       top = limbs[size - 1]
       bit_len = (size - 1) * 64 + (64 - top.leading_zeros_count.to_i32)
       est_digits = (bit_len.to_f64 * Math.log(2.0) / Math.log(base.to_f64)).to_i32 + 2
+      STDERR.puts "DC_TO_S: size=#{size}, bit_len=#{bit_len}, est_digits=#{est_digits}"
 
       # Precompute base powers: powers[i] = base^(chunk * 2^i) where chunk = chunk_params digits
       powers = precompute_base_powers(base, est_digits)
@@ -1010,6 +1011,8 @@ module BigNumber
       buf = Pointer(UInt8).malloc(est_digits)
       buf_len = est_digits
       est_digits.times { |i| buf[i] = 0_u8 }
+      @@dc_debug_base = buf
+      @@dc_debug_target = 4258
 
       # Copy limbs into a working BigInt
       num = BigInt.new(capacity: size)
@@ -1019,17 +1022,27 @@ module BigNumber
       # Recursively fill buffer
       dc_to_s_recurse(buf, buf_len, num, base, powers, powers.size - 1)
 
+      STDERR.puts "After recursion: buf[4256]=#{buf[4256]}, buf[4258]=#{buf[4258]}" if buf_len > 4258
+
       # Skip leading zeros (but respect precision)
       start = 0
       while start < buf_len - 1 && buf[start] == 0 && (buf_len - start) > precision
         start += 1
       end
+      STDERR.puts "start=#{start}, output[4256] from buf[#{start + 4256}]=#{buf[start + 4256]}" if buf_len > start + 4256
 
+      # Use buf[0] to access through the base pointer, preventing LLVM from
+      # optimizing away buf and leaving only interior pointers that GC can't trace.
       i = start
       while i < buf_len
-        c = digit_to_char(buf[i])
+        c = digit_to_char((buf + i).value)
         io << (upcase ? c.upcase : c)
         i += 1
+      end
+      # Ensure buf base pointer stays live through the loop to prevent GC collection.
+      # Access buf[0] after the loop to prevent LLVM from optimizing away the reference.
+      if buf_len > 0
+        _ = buf[0]
       end
     end
 
@@ -1052,10 +1065,28 @@ module BigNumber
 
     # Recursively convert num into buf[0..buf_len-1].
     # level is the current power table index to split at.
+    @@dc_debug_base : Pointer(UInt8) = Pointer(UInt8).null
+    @@dc_debug_target : Int32 = -1
+
     protected def self.dc_to_s_recurse(buf : Pointer(UInt8), buf_len : Int32, num : BigInt, base : Int32, powers : Array(BigInt), level : Int32)
+      abs_off = @@dc_debug_base.null? ? 0 : (buf - @@dc_debug_base).to_i32
+      covers_target = !@@dc_debug_base.null? && abs_off <= @@dc_debug_target && abs_off + buf_len > @@dc_debug_target
+
       # Base case: small enough for batch digit extraction
       if level < 0 || num.abs_size < DC_TO_S_THRESHOLD
         n = num.abs_size
+        if covers_target
+          STDERR.puts "BASE CASE: abs_off=#{abs_off}, buf_len=#{buf_len}, level=#{level}, num.abs_size=#{n}, target_local=#{@@dc_debug_target - abs_off}"
+          if n > 0
+            # Verify num's value against stdlib
+            num_str_io = String::Builder.new
+            simple_to_s(num_str_io, num.@limbs, n, base, 1, false)
+            num_str = num_str_io.to_s
+            # Compare with what the correct global value should be
+            STDERR.puts "  BASE num value: #{num_str}"
+            STDERR.puts "  BASE num limbs[0..3]: #{(0...Math.min(4,n)).map{|i| num.@limbs[i]}.join(", ")}"
+          end
+        end
         return if n == 0 # buf already zero-filled
 
         chunk_size, chunk_base = chunk_params(base)
@@ -1074,6 +1105,9 @@ module BigNumber
             # Not the last chunk: emit exactly chunk_size digits
             chunk_size.times do
               break if pos < 0
+              if covers_target && (abs_off + pos) == @@dc_debug_target
+                STDERR.puts "  WRITING target: digit=#{rem % base.to_u64}, pos=#{pos}, abs=#{abs_off + pos}, rem=#{rem}"
+              end
               buf[pos] = (rem % base.to_u64).to_u8
               rem = rem // base.to_u64
               pos -= 1
@@ -1081,11 +1115,17 @@ module BigNumber
           else
             # Last chunk: only significant digits
             while rem > 0 && pos >= 0
+              if covers_target && (abs_off + pos) == @@dc_debug_target
+                STDERR.puts "  WRITING target (last): digit=#{rem % base.to_u64}, pos=#{pos}, abs=#{abs_off + pos}, rem=#{rem}"
+              end
               buf[pos] = (rem % base.to_u64).to_u8
               rem = rem // base.to_u64
               pos -= 1
             end
           end
+        end
+        if covers_target
+          STDERR.puts "  After base case: buf[target]=#{buf[@@dc_debug_target - abs_off]}"
         end
         return
       end
@@ -1100,6 +1140,28 @@ module BigNumber
       # Split: num = hi * divisor + lo
       hi, lo = num.tdiv_rem(divisor)
 
+      # DEBUG: verify division against stdlib for splits covering target
+      if covers_target && num.abs_size < 200
+        num_str_io = String::Builder.new
+        simple_to_s(num_str_io, num.@limbs, num.abs_size, base, 1, false)
+        num_gmp = ::BigInt.new(num_str_io.to_s)
+        div_str_io = String::Builder.new
+        simple_to_s(div_str_io, divisor.@limbs, divisor.abs_size, base, 1, false)
+        div_gmp = ::BigInt.new(div_str_io.to_s)
+        hi_gmp = num_gmp // div_gmp
+        lo_gmp = num_gmp % div_gmp
+        hi_str_io = String::Builder.new
+        simple_to_s(hi_str_io, hi.@limbs, hi.abs_size, base, 1, false)
+        lo_str_io = String::Builder.new
+        simple_to_s(lo_str_io, lo.@limbs, lo.abs_size, base, 1, false)
+        if hi_str_io.to_s != hi_gmp.to_s
+          STDERR.puts "  DIV BUG (hi) at level=#{level}"
+        end
+        if lo_str_io.to_s != lo_gmp.to_s
+          STDERR.puts "  DIV BUG (lo) at level=#{level}"
+        end
+      end
+
       # The divisor covers chunk_size * 2^level digits → that's the size of the lower half
       chunk_size, _ = chunk_params(base)
       lo_digits = chunk_size * (1 << level)
@@ -1108,9 +1170,24 @@ module BigNumber
       end
       hi_digits = buf_len - lo_digits
 
+      if covers_target
+        STDERR.puts "SPLIT level=#{level}: abs_off=#{abs_off}, buf_len=#{buf_len}, hi_digits=#{hi_digits}, lo_digits=#{lo_digits}, hi.size=#{hi.abs_size}, lo.size=#{lo.abs_size}"
+        target_local = @@dc_debug_target - abs_off
+        STDERR.puts "  target_local=#{target_local}, in #{target_local < hi_digits ? "HI" : "LO"}"
+        STDERR.puts "  buf[target] before recurse: #{buf[target_local]}"
+      end
+
       # Recurse on each half
       dc_to_s_recurse(buf, hi_digits, hi, base, powers, level - 1)
+      if covers_target
+        target_local = @@dc_debug_target - abs_off
+        STDERR.puts "  buf[target] after HI recurse: #{buf[target_local]}"
+      end
       dc_to_s_recurse(buf + hi_digits, lo_digits, lo, base, powers, level - 1)
+      if covers_target
+        target_local = @@dc_debug_target - abs_off
+        STDERR.puts "  buf[target] after LO recurse: #{buf[target_local]}"
+      end
     end
 
     def inspect(io : IO) : Nil
@@ -1610,14 +1687,18 @@ module BigNumber
     end
 
     KARATSUBA_THRESHOLD = 32
+    TOOM3_THRESHOLD     = 90
 
     # Top-level multiply dispatch. an >= bn > 0. rp must not alias ap or bp.
     protected def self.limbs_mul(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32)
       if bn < KARATSUBA_THRESHOLD
         limbs_mul_schoolbook(rp, ap, an, bp, bn)
-      else
+      elsif bn < TOOM3_THRESHOLD
         scratch = Pointer(Limb).malloc(karatsuba_scratch_size(an))
         limbs_mul_karatsuba(rp, ap, an, bp, bn, scratch)
+      else
+        scratch = Pointer(Limb).malloc(toom3_scratch_size(an))
+        limbs_mul_toom3(rp, ap, an, bp, bn, scratch)
       end
     end
 
@@ -1747,11 +1828,11 @@ module BigNumber
       remaining = an
       while remaining > 0
         chunk = Math.min(remaining, bn)
-        # Ensure larger operand is first for Karatsuba
+        # Dispatch to best algorithm for this chunk size
         if chunk >= bn
-          limbs_mul_karatsuba(tmp, ap + offset, chunk, bp, bn, inner_scratch)
+          limbs_mul_dispatch(tmp, ap + offset, chunk, bp, bn, inner_scratch)
         else
-          limbs_mul_karatsuba(tmp, bp, bn, ap + offset, chunk, inner_scratch)
+          limbs_mul_dispatch(tmp, bp, bn, ap + offset, chunk, inner_scratch)
         end
         product_size = chunk + bn
         limbs_add(rp + offset, rp + offset, an + bn - offset, tmp, product_size)
@@ -1760,10 +1841,467 @@ module BigNumber
       end
     end
 
+    # Internal dispatch for recursive multiply (Karatsuba/Toom3 callers).
+    # Assumes scratch is already allocated and large enough.
+    protected def self.limbs_mul_dispatch(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
+      if bn < KARATSUBA_THRESHOLD
+        limbs_mul_schoolbook(rp, ap, an, bp, bn)
+      elsif bn < TOOM3_THRESHOLD
+        limbs_mul_karatsuba(rp, ap, an, bp, bn, scratch)
+      else
+        limbs_mul_toom3(rp, ap, an, bp, bn, scratch)
+      end
+    end
+
     protected def self.karatsuba_scratch_size(n : Int32) : Int32
       # Each Karatsuba level needs ~4*(n/2+1) scratch plus recursive scratch.
       # S(n) = 4*(n/2+1) + S(n/2+1) ≈ 4n. Add 2*n for unbalanced multiply tmp buffer.
       Math.max(6 * n + 64, 256)
+    end
+
+    protected def self.toom3_scratch_size(n : Int32) : Int32
+      # Toom-3 needs space for 5 evaluation temporaries (~k+1 each where k=ceil(n/3)),
+      # 5 product temporaries (~2k+2 each), plus recursive scratch.
+      # Conservative: ~20n covers evaluation + products + recursion.
+      Math.max(20 * n + 512, 2048)
+    end
+
+    # Toom-Cook 3-way multiply: O(n^1.465).
+    # Splits each operand into 3 pieces, evaluates at 5 points {0, 1, -1, 2, ∞},
+    # does 5 recursive multiplications of ~n/3 size, then interpolates.
+    # Requires an >= bn >= TOOM3_THRESHOLD. rp must have space for an+bn limbs.
+    @@toom3_debug = false
+
+    protected def self.limbs_mul_toom3(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
+      # DEBUG: save inputs at the very start
+      ap_copy = Pointer(Limb).null
+      bp_copy = Pointer(Limb).null
+      if @@toom3_debug
+        ap_copy = Pointer(Limb).malloc(an)
+        bp_copy = Pointer(Limb).malloc(bn)
+        an.times { |i| ap_copy[i] = ap[i] }
+        bn.times { |i| bp_copy[i] = bp[i] }
+      end
+
+      if bn < TOOM3_THRESHOLD
+        if bn < KARATSUBA_THRESHOLD
+          limbs_mul_schoolbook(rp, ap, an, bp, bn)
+        else
+          limbs_mul_karatsuba(rp, ap, an, bp, bn, scratch)
+        end
+        return
+      end
+
+      if an >= 3 * bn
+        limbs_mul_unbalanced(rp, ap, an, bp, bn, scratch)
+        return
+      end
+
+      # Split into thirds: k = ceil(an/3) so both operands fit in 3 pieces of size k.
+      # Using bn would leave a2 with up to an-2*ceil(bn/3) limbs, which overflows buffers.
+      k = (an + 2) // 3
+
+      # a = a2*B^(2k) + a1*B^k + a0
+      a0 = ap;           a0n = Math.min(k, an)
+      a1 = ap + k;       a1n = Math.min(k, Math.max(an - k, 0))
+      a2 = ap + 2 * k;   a2n = Math.max(an - 2 * k, 0)
+
+      # b = b2*B^(2k) + b1*B^k + b0
+      b0 = bp;           b0n = Math.min(k, bn)
+      b1 = bp + k;       b1n = Math.min(k, Math.max(bn - k, 0))
+      b2 = bp + 2 * k;   b2n = Math.max(bn - 2 * k, 0)
+
+      # We need 5 product buffers in scratch, each up to 2*(k+1) limbs.
+      # Layout: [w0 | w1 | wm1 | w2 | winf | eval_a | eval_b | recursive_scratch]
+      pn = 2 * (k + 1)  # max product size
+      w0   = scratch
+      w1   = scratch + pn
+      wm1  = scratch + 2 * pn
+      w2   = scratch + 3 * pn
+      winf = scratch + 4 * pn
+
+      # Evaluation temporaries
+      ea = scratch + 5 * pn        # k+2 limbs for evaluating a
+      eb = scratch + 5 * pn + k + 2  # k+2 limbs for evaluating b
+      rec_scratch = scratch + 5 * pn + 2 * (k + 2)
+
+      # --- Evaluate at point 0: a(0) = a0, b(0) = b0 ---
+      # W(0) = a0 * b0
+      toom3_mul_recurse(w0, a0, a0n, b0, b0n, rec_scratch)
+      w0n = a0n + b0n
+      while w0n > 0 && w0[w0n - 1] == 0; w0n -= 1; end
+
+      # --- Evaluate at point ∞: a(∞) = a2, b(∞) = b2 ---
+      # W(∞) = a2 * b2
+      if a2n > 0 && b2n > 0
+        toom3_mul_recurse(winf, a2, a2n, b2, b2n, rec_scratch)
+        winfn = a2n + b2n
+        while winfn > 0 && winf[winfn - 1] == 0; winfn -= 1; end
+      else
+        winf[0] = 0_u64
+        winfn = 0
+      end
+
+      # --- Evaluate at point 1: a(1) = a0+a1+a2, b(1) = b0+b1+b2 ---
+      ean = toom3_eval_pos(ea, a0, a0n, a1, a1n, a2, a2n)
+      ebn = toom3_eval_pos(eb, b0, b0n, b1, b1n, b2, b2n)
+      toom3_mul_recurse(w1, ea, ean, eb, ebn, rec_scratch)
+      w1n = ean + ebn
+      while w1n > 0 && w1[w1n - 1] == 0; w1n -= 1; end
+
+      # --- Evaluate at point -1: a(-1) = a0-a1+a2, b(-1) = b0-b1+b2 ---
+      ea_neg = false
+      eb_neg = false
+      ean, ea_neg = toom3_eval_neg(ea, a0, a0n, a1, a1n, a2, a2n)
+      ebn, eb_neg = toom3_eval_neg(eb, b0, b0n, b1, b1n, b2, b2n)
+      toom3_mul_recurse(wm1, ea, ean, eb, ebn, rec_scratch)
+      wm1n = ean + ebn
+      while wm1n > 0 && wm1[wm1n - 1] == 0; wm1n -= 1; end
+      wm1_neg = ea_neg ^ eb_neg  # product is negative if exactly one eval was negative
+
+      # --- Evaluate at point 2: a(2) = a0+2*a1+4*a2, b(2) = b0+2*b1+4*b2 ---
+      ean = toom3_eval_at2(ea, a0, a0n, a1, a1n, a2, a2n)
+      ebn = toom3_eval_at2(eb, b0, b0n, b1, b1n, b2, b2n)
+      toom3_mul_recurse(w2, ea, ean, eb, ebn, rec_scratch)
+      w2n = ean + ebn
+      while w2n > 0 && w2[w2n - 1] == 0; w2n -= 1; end
+
+      # --- Interpolation ---
+      # We have: w0=W(0), w1=W(1), wm1=W(-1) (with sign), w2=W(2), winf=W(∞)
+      # Need to recover r0..r4 where result = r0 + r1*B^k + r2*B^(2k) + r3*B^(3k) + r4*B^(4k)
+      #
+      # r0 = w0
+      # r4 = winf
+      # r3 = (w2 - w1) / 3 - (wm1_adj) ... using standard Toom-3 interpolation sequence
+      #
+      # Standard sequence (Bodrato & Zanoni):
+      # 1. r3 = (w2 - wm1) / 3
+      # 2. r1 = (w1 - wm1) / 2
+      # 3. r2 = wm1 - w0   (using the sign-adjusted wm1)
+      # ... actually let me use the standard formulation carefully.
+      #
+      # Let W0=w0, W1=w1, Wn=wm1 (with sign), W2=w2, Wi=winf
+      # The interpolation matrix inversion gives:
+      #   r0 = W0
+      #   r4 = Wi
+      #   r3 = (W2 - Wn) / 3          (then: r3 = (r3 - W1) / 2 + 2*Wi)  -- wait, standard formulation
+      #
+      # Using the well-known Toom-3 interpolation (from "Improved Toom-Cook" / GMP docs):
+      #   Step 1: r3 = (w2 - wm1) / 3
+      #   Step 2: r1 = (w1 - wm1) / 2
+      #   Step 3: r2 = w1 - w0   (where w1 here is W(1), wm1 is signed W(-1))
+      #   ... no, I need to be precise.
+      #
+      # Correct standard Toom-3 interpolation:
+      #   Given: w0 = r0, w1 = r0+r1+r2+r3+r4, wm1 = r0-r1+r2-r3+r4,
+      #          w2 = r0+2r1+4r2+8r3+16r4, winf = r4
+      #
+      #   1. w3 = (w2 - wm1) / 3       = 2*r1 + 4*r2 + (8+16/3)*... no
+      #
+      # Let me just use the concrete formulas:
+      #   r0 = w0
+      #   r4 = winf
+      #   t1 = (w1 + wm1) / 2          = r0 + r2 + r4
+      #   t2 = w1 - w0                  = r1 + r2 + r3 + r4
+      #   t3 = (w2 - wm1) / 3          = r1 + r2*5/3... no...
+      #
+      # OK let me use the standard concrete sequence properly:
+      #   r0 = w0
+      #   r4 = winf
+      #   Then define:
+      #     w1 := w1 - w0              = r1 + r2 + r3 + r4
+      #     w2 := w2 - wm1             = 2*(r1 + r2 + ... ) ... hmm
+      #
+      # I'll implement it step by step from the standard Toom-3 interpolation.
+
+      toom3_interpolate(rp, an + bn, k, w0, w0n, w1, w1n, wm1, wm1n, wm1_neg, w2, w2n, winf, winfn)
+
+      # DEBUG: verify against Karatsuba using saved inputs
+      if @@toom3_debug
+        rn = an + bn
+        check = Pointer(Limb).malloc(rn)
+        kara_scratch = Pointer(Limb).malloc(karatsuba_scratch_size(an))
+        limbs_mul_karatsuba(check, ap_copy.not_nil!, an, bp_copy.not_nil!, bn, kara_scratch)
+        match = true
+        rn.times do |i|
+          if rp[i] != check[i]
+            STDERR.puts "TOOM3 MISMATCH at limb #{i}/#{rn} (an=#{an}, bn=#{bn}, k=#{k}): got #{rp[i]}, expected #{check[i]}"
+            # Print first few limbs of ap and bp
+            STDERR.puts "  ap[0..4]: #{(0...Math.min(5,an)).map{|j| ap_copy.not_nil![j]}.join(", ")}"
+            STDERR.puts "  bp[0..4]: #{(0...Math.min(5,bn)).map{|j| bp_copy.not_nil![j]}.join(", ")}"
+            STDERR.puts "  ap[k-1..k+1]: #{(Math.max(0,k-1)...Math.min(an,k+2)).map{|j| ap_copy.not_nil![j]}.join(", ")}"
+            STDERR.puts "  bp[k-1..k+1]: #{(Math.max(0,k-1)...Math.min(bn,k+2)).map{|j| bp_copy.not_nil![j]}.join(", ")}"
+            # Also dump the 5 products at the point of the mismatch
+            STDERR.puts "  w0[#{k}]: #{k < w0n ? w0[k] : "N/A"}"
+            STDERR.puts "  w1[0..2]: #{(0...Math.min(3,w1n)).map{|j| w1[j]}.join(", ")}"
+            STDERR.puts "  wm1[0..2]: #{(0...Math.min(3,wm1n)).map{|j| wm1[j]}.join(", ")}, neg=#{wm1_neg}"
+            match = false
+            break
+          end
+        end
+        STDERR.puts "TOOM3 VERIFY OK (an=#{an}, bn=#{bn}, k=#{k})" if match
+      end
+    end
+
+    # Evaluate p(1) = a0 + a1 + a2. Returns actual size of result in ea.
+    protected def self.toom3_eval_pos(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32) : Int32
+      # ea = a0 + a1
+      if a0n >= a1n
+        carry = a1n > 0 ? limbs_add(ea, a0, a0n, a1, a1n) : (a0n.times { |i| ea[i] = a0[i] }; 0_u64)
+        ean = a0n
+      else
+        carry = limbs_add(ea, a1, a1n, a0, a0n)
+        ean = a1n
+      end
+      ea[ean] = carry
+      ean += 1 if carry != 0
+
+      # ea += a2
+      if a2n > 0
+        if ean >= a2n
+          carry2 = limbs_add(ea, ea, ean, a2, a2n)
+        else
+          carry2 = limbs_add(ea, a2, a2n, ea, ean)
+          ean = a2n
+        end
+        ea[ean] = carry2
+        ean += 1 if carry2 != 0
+      end
+
+      while ean > 1 && ea[ean - 1] == 0; ean -= 1; end
+      ean = 1 if ean == 0
+      ean
+    end
+
+    # Evaluate p(-1) = a0 - a1 + a2. Returns {size, negative}.
+    protected def self.toom3_eval_neg(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32) : {Int32, Bool}
+      # First compute t = a0 + a2
+      if a0n >= a2n
+        carry = a2n > 0 ? limbs_add(ea, a0, a0n, a2, a2n) : (a0n.times { |i| ea[i] = a0[i] }; 0_u64)
+        tn = a0n
+      else
+        carry = limbs_add(ea, a2, a2n, a0, a0n)
+        tn = a2n
+      end
+      ea[tn] = carry
+      tn += 1 if carry != 0
+      while tn > 1 && ea[tn - 1] == 0; tn -= 1; end
+
+      # Now subtract a1: result = (a0 + a2) - a1
+      neg = false
+      if a1n == 0
+        # result is just ea, positive
+      else
+        cmp = limbs_cmp(ea, tn, a1, a1n)
+        if cmp >= 0
+          limbs_sub(ea, ea, tn, a1, a1n)
+        else
+          # Need to compute a1 - (a0+a2), result is negative
+          # Use ea as temp - we can overwrite since we're computing into ea
+          limbs_sub(ea, a1, a1n, ea, tn)
+          tn = a1n
+          neg = true
+        end
+      end
+
+      while tn > 1 && ea[tn - 1] == 0; tn -= 1; end
+      tn = 1 if tn == 0
+      {tn, neg}
+    end
+
+    # Evaluate p(2) = a0 + 2*a1 + 4*a2. Returns actual size.
+    # Uses a small temp buffer to compute 2*a1 and 4*a2 cleanly.
+    protected def self.toom3_eval_at2(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32) : Int32
+      # Start with a0
+      a0n.times { |i| ea[i] = a0[i] }
+      ean = a0n
+      ean = 1 if ean == 0
+      if ean == 0
+        ea[0] = 0_u64
+        ean = 1
+      end
+
+      # Add 2*a1 using a temp buffer
+      if a1n > 0
+        tmp = Pointer(Limb).malloc(a1n + 1)
+        top = limbs_lshift(tmp, a1, a1n, 1)
+        tmpn = a1n
+        if top != 0; tmp[tmpn] = top; tmpn += 1; end
+        if ean >= tmpn
+          c = limbs_add(ea, ea, ean, tmp, tmpn)
+        else
+          c = limbs_add(ea, tmp, tmpn, ea, ean)
+          ean = tmpn
+        end
+        if c != 0; ea[ean] = c; ean += 1; end
+      end
+
+      # Add 4*a2
+      if a2n > 0
+        tmp = Pointer(Limb).malloc(a2n + 1)
+        top = limbs_lshift(tmp, a2, a2n, 2)
+        tmpn = a2n
+        if top != 0; tmp[tmpn] = top; tmpn += 1; end
+        if ean >= tmpn
+          c = limbs_add(ea, ea, ean, tmp, tmpn)
+        else
+          c = limbs_add(ea, tmp, tmpn, ea, ean)
+          ean = tmpn
+        end
+        if c != 0; ea[ean] = c; ean += 1; end
+      end
+
+      while ean > 1 && ea[ean - 1] == 0; ean -= 1; end
+      ean = 1 if ean == 0
+      ean
+    end
+
+    # Recursive multiply helper for Toom-3 evaluations.
+    protected def self.toom3_mul_recurse(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
+      # Ensure an >= bn
+      if an < bn
+        ap, bp = bp, ap
+        an, bn = bn, an
+      end
+      return if bn == 0 || an == 0
+      if bn < KARATSUBA_THRESHOLD
+        limbs_mul_schoolbook(rp, ap, an, bp, bn)
+      elsif bn < TOOM3_THRESHOLD
+        limbs_mul_karatsuba(rp, ap, an, bp, bn, scratch)
+      else
+        # Allocate fresh scratch to avoid aliasing (debug/correctness first)
+        fresh_scratch = Pointer(Limb).malloc(toom3_scratch_size(an))
+        limbs_mul_toom3(rp, ap, an, bp, bn, fresh_scratch)
+      end
+    end
+
+    # Toom-3 interpolation. Recovers coefficients c0..c4 and writes the final product to rp.
+    #
+    # Formulas (derived from inverting the 5-point evaluation matrix):
+    #   c0 = w0
+    #   c4 = winf
+    #   c2 = (w1 + wm1)/2 - c0 - c4
+    #   t  = (w1 - wm1)/2                  (= c1 + c3)
+    #   c3 = ((w2 - w0)/2 - t - 2*c2 - 8*c4) / 3
+    #   c1 = t - c3
+    #
+    # Result = c0 + c1*B^k + c2*B^(2k) + c3*B^(3k) + c4*B^(4k).
+    protected def self.toom3_interpolate(rp : Pointer(Limb), rn : Int32,
+                                          k : Int32,
+                                          w0 : Pointer(Limb), w0n : Int32,
+                                          w1 : Pointer(Limb), w1n : Int32,
+                                          wm1 : Pointer(Limb), wm1n : Int32, wm1_neg : Bool,
+                                          w2 : Pointer(Limb), w2n : Int32,
+                                          winf : Pointer(Limb), winfn : Int32)
+      # Allocate temp buffers to avoid aliasing issues.
+      # Each coefficient is at most 2*(k+1) limbs.
+      maxn = 2 * k + 4
+      c2 = Pointer(Limb).malloc(maxn)
+      t  = Pointer(Limb).malloc(maxn)
+
+      # --- c2 = (w1 + wm1) / 2 - w0 - winf ---
+      # w1 + signed_wm1: if wm1_neg, w1 + (-|wm1|) = w1 - |wm1|; else w1 + |wm1|
+      # w1 + wm1 = 2*(c0 + c2 + c4), always non-negative.
+      if wm1_neg
+        c2n = w1n
+        w1n.times { |i| c2[i] = w1[i] }
+        limbs_sub(c2, c2, c2n, wm1, wm1n) if wm1n > 0
+      else
+        if w1n >= wm1n
+          c = limbs_add(c2, w1, w1n, wm1, wm1n)
+          c2n = w1n
+        else
+          c = limbs_add(c2, wm1, wm1n, w1, w1n)
+          c2n = wm1n
+        end
+        if c != 0; c2[c2n] = c; c2n += 1; end
+      end
+      while c2n > 1 && c2[c2n - 1] == 0; c2n -= 1; end
+      limbs_rshift(c2, c2, c2n, 1)
+      while c2n > 1 && c2[c2n - 1] == 0; c2n -= 1; end
+      # Subtract w0
+      limbs_sub(c2, c2, c2n, w0, w0n) if w0n > 0
+      while c2n > 1 && c2[c2n - 1] == 0; c2n -= 1; end
+      # Subtract winf
+      limbs_sub(c2, c2, c2n, winf, winfn) if winfn > 0
+      while c2n > 1 && c2[c2n - 1] == 0; c2n -= 1; end
+
+      # --- t = (w1 - wm1) / 2 = c1 + c3 (always non-negative) ---
+      if wm1_neg
+        # w1 - (-|wm1|) = w1 + |wm1|
+        if w1n >= wm1n
+          c = limbs_add(t, w1, w1n, wm1, wm1n)
+          tn = w1n
+        else
+          c = limbs_add(t, wm1, wm1n, w1, w1n)
+          tn = wm1n
+        end
+        if c != 0; t[tn] = c; tn += 1; end
+      else
+        # w1 - |wm1|
+        tn = w1n
+        w1n.times { |i| t[i] = w1[i] }
+        limbs_sub(t, t, tn, wm1, wm1n) if wm1n > 0
+      end
+      while tn > 1 && t[tn - 1] == 0; tn -= 1; end
+      limbs_rshift(t, t, tn, 1)
+      while tn > 1 && t[tn - 1] == 0; tn -= 1; end
+
+      # --- c3 = ((w2 - w0) / 2 - t - 2*c2 - 8*winf) / 3 ---
+      # Compute into w2 buffer (safe to overwrite now)
+      c3 = w2
+      c3n = w2n
+      # c3 = w2 - w0
+      limbs_sub(c3, c3, c3n, w0, w0n) if w0n > 0
+      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      # c3 = c3 / 2
+      limbs_rshift(c3, c3, c3n, 1)
+      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      # c3 -= t
+      limbs_sub(c3, c3, c3n, t, tn) if tn > 0
+      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      # c3 -= 2*c2
+      limbs_sub(c3, c3, c3n, c2, c2n) if c2n > 0
+      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      limbs_sub(c3, c3, c3n, c2, c2n) if c2n > 0
+      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      # c3 -= 8*winf (subtract winf 8 times, or shift+sub)
+      if winfn > 0
+        # Compute 8*winf into a temp
+        tmp8 = Pointer(Limb).malloc(winfn + 1)
+        top = limbs_lshift(tmp8, winf, winfn, 3)
+        tmp8n = winfn
+        if top != 0; tmp8[tmp8n] = top; tmp8n += 1; end
+        limbs_sub(c3, c3, c3n, tmp8, tmp8n)
+        while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+      end
+      # c3 /= 3
+      limbs_div_rem_1(c3, c3, c3n, 3_u64)
+      while c3n > 1 && c3[c3n - 1] == 0; c3n -= 1; end
+
+      # --- c1 = t - c3 ---
+      c1 = t  # reuse t buffer (t = c1 + c3, so c1 = t - c3)
+      c1n = tn
+      limbs_sub(c1, c1, c1n, c3, c3n) if c3n > 0
+      while c1n > 1 && c1[c1n - 1] == 0; c1n -= 1; end
+
+      # --- Recompose: result = c0 + c1*B^k + c2*B^(2k) + c3*B^(3k) + c4*B^(4k) ---
+      rn.times { |i| rp[i] = 0_u64 }
+
+      # c0 = w0 at offset 0
+      w0n.times { |i| rp[i] = w0[i] } if w0n > 0
+
+      # c4 = winf at offset 4k
+      winfn.times { |i| rp[4 * k + i] = winf[i] } if winfn > 0
+
+      # c1 at offset k (add)
+      limbs_add(rp + k, rp + k, rn - k, c1, c1n) if c1n > 0
+
+      # c2 at offset 2k (add)
+      limbs_add(rp + 2 * k, rp + 2 * k, rn - 2 * k, c2, c2n) if c2n > 0
+
+      # c3 at offset 3k (add)
+      limbs_add(rp + 3 * k, rp + 3 * k, rn - 3 * k, c3, c3n) if c3n > 0
     end
 
     # Divide limb array by a single limb. Returns remainder.
