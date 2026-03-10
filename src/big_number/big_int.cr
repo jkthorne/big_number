@@ -346,7 +346,8 @@ module BigNumber
       qn = an - bn + 1
       q = BigInt.new(capacity: qn)
       r = BigInt.new(capacity: bn)
-      BigInt.limbs_div_rem(q.@limbs, r.@limbs, @limbs, an, other.@limbs, bn)
+      scratch = Pointer(Limb).malloc(an + bn + 1)
+      BigInt.limbs_div_rem(q.@limbs, r.@limbs, @limbs, an, other.@limbs, bn, scratch)
       q.set_size(qn)
       q.normalize!
       r.set_size(bn)
@@ -1642,12 +1643,13 @@ module BigNumber
     # Requires nn >= dn >= 2, and dp[dn-1] != 0.
     protected def self.limbs_div_rem(qp : Pointer(Limb), rp : Pointer(Limb),
                                      np : Pointer(Limb), nn : Int32,
-                                     dp : Pointer(Limb), dn : Int32)
+                                     dp : Pointer(Limb), dn : Int32,
+                                     scratch : Pointer(Limb))
       # Step D1: Normalize — shift so that dp[dn-1] has its high bit set.
       shift = dp[dn - 1].leading_zeros_count.to_i32
-      # Allocate working copies
-      un = Pointer(Limb).malloc(nn + 1)  # normalized dividend (one extra limb)
-      vn = Pointer(Limb).malloc(dn)      # normalized divisor
+      # Use scratch for working copies: un at scratch[0..nn], vn at scratch[nn+1..nn+dn]
+      un = scratch                  # normalized dividend (nn+1 limbs)
+      vn = scratch + (nn + 1)       # normalized divisor (dn limbs)
 
       if shift > 0
         limbs_lshift(vn, dp, dn, shift)
