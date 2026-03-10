@@ -263,16 +263,14 @@ module BigNumber
       # Single-limb fast path: use UInt128 multiply
       if @size.abs == 1 && other.@size.abs == 1
         prod = @limbs[0].to_u128 &* other.@limbs[0].to_u128
-        result = BigInt.new
-        if prod <= UInt64::MAX.to_u128
-          result.ensure_capacity(1)
-          result.@limbs[0] = prod.to_u64!
-          result.set_size(1)
-        else
-          result.ensure_capacity(2)
-          result.@limbs[0] = prod.to_u64!
-          result.@limbs[1] = (prod >> 64).to_u64!
+        result = BigInt.new(capacity: 2)
+        result.@limbs[0] = prod.to_u64!
+        hi = (prod >> 64).to_u64!
+        if hi != 0
+          result.@limbs[1] = hi
           result.set_size(2)
+        else
+          result.set_size(1)
         end
         if (@size < 0) ^ (other.@size < 0)
           result.set_size(-result.@size)
@@ -283,8 +281,7 @@ module BigNumber
       an = abs_size
       bn = other.abs_size
       rn = an + bn
-      result = BigInt.new
-      result.ensure_capacity(rn)
+      result = BigInt.new(capacity: rn)
       if an >= bn
         BigInt.limbs_mul(result.@limbs, @limbs, an, other.@limbs, bn)
       else
@@ -325,14 +322,13 @@ module BigNumber
 
       # Single-limb divisor fast path
       if bn == 1
-        q = BigInt.new
-        q.ensure_capacity(an)
+        q = BigInt.new(capacity: an)
         rem_limb = BigInt.limbs_div_rem_1(q.@limbs, @limbs, an, other.@limbs[0])
         q.set_size(an)
         q.normalize!
         r = BigInt.new
         if rem_limb != 0
-          r.ensure_capacity(1)
+          r = BigInt.new(capacity: 1)
           r.@limbs[0] = rem_limb
           r.set_size(1)
         end
@@ -348,10 +344,8 @@ module BigNumber
 
       # Multi-limb: Knuth Algorithm D
       qn = an - bn + 1
-      q = BigInt.new
-      q.ensure_capacity(qn)
-      r = BigInt.new
-      r.ensure_capacity(bn)
+      q = BigInt.new(capacity: qn)
+      r = BigInt.new(capacity: bn)
       BigInt.limbs_div_rem(q.@limbs, r.@limbs, @limbs, an, other.@limbs, bn)
       q.set_size(qn)
       q.normalize!
@@ -541,8 +535,7 @@ module BigNumber
 
       n = abs_size
       new_size = n + whole_limbs + (bit_shift > 0 ? 1 : 0)
-      result = BigInt.new
-      result.ensure_capacity(new_size)
+      result = BigInt.new(capacity: new_size)
 
       # Zero the bottom limbs
       whole_limbs.times { |i| result.@limbs[i] = 0_u64 }
@@ -575,8 +568,7 @@ module BigNumber
       end
 
       new_size = n - whole_limbs
-      result = BigInt.new
-      result.ensure_capacity(new_size)
+      result = BigInt.new(capacity: new_size)
 
       if bit_shift > 0
         BigInt.limbs_rshift(result.@limbs, @limbs + whole_limbs, new_size, bit_shift)
@@ -1083,6 +1075,12 @@ module BigNumber
 
     # --- Protected helpers exposed to other BigInt methods ---
 
+    protected def initialize(*, capacity : Int32)
+      @limbs = Pointer(Limb).malloc(capacity)
+      @alloc = capacity
+      @size = 0
+    end
+
     protected def set_size(@size : Int32)
     end
 
@@ -1119,13 +1117,11 @@ module BigNumber
     end
 
     protected def dup_value : BigInt
-      result = BigInt.new
       n = abs_size
-      if n > 0
-        result.ensure_capacity(n)
-        result.@limbs.copy_from(@limbs, n)
-        result.set_size(@size)
-      end
+      return BigInt.new if n == 0
+      result = BigInt.new(capacity: n)
+      result.@limbs.copy_from(@limbs, n)
+      result.set_size(@size)
       result
     end
 
@@ -1193,7 +1189,7 @@ module BigNumber
       end
 
       # Convert result back from two's complement
-      result = BigInt.new
+      result = BigInt.new(capacity: max_n)
       if result_negative
         # Result is negative: r_tc is two's complement of magnitude
         # magnitude = ~r_tc + 1 (negate two's complement)
@@ -1205,12 +1201,10 @@ module BigNumber
           r_tc[i] = sum.to_u64!
           carry = (sum >> 64).to_u64!
         end
-        result.ensure_capacity(max_n)
         result.@limbs.copy_from(r_tc, max_n)
         result.set_size(-max_n)
         result.normalize!
       else
-        result.ensure_capacity(max_n)
         result.@limbs.copy_from(r_tc, max_n)
         result.set_size(max_n)
         result.normalize!
@@ -1222,8 +1216,7 @@ module BigNumber
       an = abs_size
       bn = other.abs_size
       max_n = Math.max(an, bn)
-      result = BigInt.new
-      result.ensure_capacity(max_n)
+      result = BigInt.new(capacity: max_n)
       max_n.times do |i|
         a_limb = i < an ? @limbs[i] : 0_u64
         b_limb = i < bn ? other.@limbs[i] : 0_u64
@@ -1286,8 +1279,7 @@ module BigNumber
         an, bn = bn, an
         ap, bp = bp, ap
       end
-      result = BigInt.new
-      result.ensure_capacity(an + 1)
+      result = BigInt.new(capacity: an + 1)
       carry = BigInt.limbs_add(result.@limbs, ap, an, bp, bn)
       if carry != 0
         result.@limbs[an] = carry
@@ -1309,20 +1301,17 @@ module BigNumber
       if cmp == 0
         return BigInt.new # equal magnitudes = zero
       end
-      result = BigInt.new
       if cmp > 0
         # |self| > |other|
-        result.ensure_capacity(an)
+        result = BigInt.new(capacity: an)
         BigInt.limbs_sub(result.@limbs, @limbs, an, other.@limbs, bn)
         result.set_size(an)
-        # Result has sign of self
         result.set_size(-result.@size) if @size < 0
       else
         # |self| < |other|
-        result.ensure_capacity(bn)
+        result = BigInt.new(capacity: bn)
         BigInt.limbs_sub(result.@limbs, other.@limbs, bn, @limbs, an)
         result.set_size(bn)
-        # Result has sign of other (opposite of self, since we're subtracting)
         result.set_size(-result.@size) if @size >= 0
       end
       result.normalize!
