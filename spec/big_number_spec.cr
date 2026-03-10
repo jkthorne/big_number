@@ -1,7 +1,5 @@
 require "./spec_helper"
 
-alias BI = BigNumber::BigInt
-
 describe BigNumber::BigInt do
   # --- Construction ---
 
