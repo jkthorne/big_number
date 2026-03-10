@@ -1339,18 +1339,15 @@ module BigNumber
       carry = 0_u64
       i = 0
       while i < bn
-        s = ap[i] &+ bp[i]
-        c1 = s < ap[i] ? 1_u64 : 0_u64
-        s2 = s &+ carry
-        c2 = s2 < s ? 1_u64 : 0_u64
-        rp[i] = s2
-        carry = c1 &+ c2
+        sum = ap[i].to_u128 &+ bp[i].to_u128 &+ carry.to_u128
+        rp[i] = sum.to_u64!
+        carry = (sum >> 64).to_u64!
         i += 1
       end
       while i < an
-        s = ap[i] &+ carry
-        carry = s < ap[i] ? 1_u64 : 0_u64
-        rp[i] = s
+        sum = ap[i].to_u128 &+ carry.to_u128
+        rp[i] = sum.to_u64!
+        carry = (sum >> 64).to_u64!
         i += 1
       end
       carry
