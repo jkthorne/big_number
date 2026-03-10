@@ -1911,6 +1911,16 @@ module BigNumber
       b1 = bp + k;       b1n = Math.min(k, Math.max(bn - k, 0))
       b2 = bp + 2 * k;   b2n = Math.max(bn - 2 * k, 0)
 
+      # Normalize piece sizes (strip leading zeros) so limbs_cmp works correctly
+      # in evaluation functions. Without this, pieces with trailing zeros in the
+      # original number (e.g. 10^8192) would have inflated sizes.
+      while a0n > 0 && a0[a0n - 1] == 0; a0n -= 1; end
+      while a1n > 0 && a1[a1n - 1] == 0; a1n -= 1; end
+      while a2n > 0 && a2[a2n - 1] == 0; a2n -= 1; end
+      while b0n > 0 && b0[b0n - 1] == 0; b0n -= 1; end
+      while b1n > 0 && b1[b1n - 1] == 0; b1n -= 1; end
+      while b2n > 0 && b2[b2n - 1] == 0; b2n -= 1; end
+
       # We need 5 product buffers in scratch, each up to 2*(k+1) limbs.
       # Layout: [w0 | w1 | wm1 | w2 | winf | eval_a | eval_b | recursive_scratch]
       pn = 2 * (k + 1)  # max product size
