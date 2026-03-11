@@ -504,7 +504,7 @@ module BigNumber
       q, r = tdiv_rem(other)
       # If remainder is nonzero and signs of dividend and divisor differ, adjust
       if !r.zero? && ((@size < 0) ^ (other.@size < 0))
-        q = q - BigInt.new(1)
+        q = q - 1
         r = r + other
       end
       {q, r}
@@ -627,17 +627,23 @@ module BigNumber
 
     def pow_mod(exp : BigInt, mod : BigInt) : BigInt
       raise ArgumentError.new("Negative exponent") if exp.negative?
-      raise ArgumentError.new("Modulus must be positive") if mod <= BigInt.new(0)
-      return BigInt.new if mod == BigInt.new(1)
-      result = BigInt.new(1) % mod
-      base = self % mod
-      e = exp.dup_value
-      while e > BigInt.new(0)
-        if e.odd?
+      raise ArgumentError.new("Modulus must be positive") if !mod.positive?
+      return BigInt.new if mod.abs_size == 1 && mod.@limbs[0] == 1_u64
+      result = self % mod
+      if exp.zero?
+        return BigInt.new(1) % mod
+      end
+      # Use the exponent's bit_length to iterate without allocating a copy
+      base = result
+      result = BigInt.new(1)
+      bits = exp.bit_length
+      i = 0
+      while i < bits
+        if exp.bit(i) == 1
           result = (result * base) % mod
         end
-        e = e >> 1
-        base = (base * base) % mod if e > BigInt.new(0)
+        i += 1
+        base = (base * base) % mod if i < bits
       end
       result
     end
@@ -656,10 +662,10 @@ module BigNumber
       # ~x = -(x + 1)
       if negative?
         # ~(-x) = x - 1
-        self.abs - BigInt.new(1)
+        self.abs - 1
       else
         # ~x = -(x + 1)
-        -(self + BigInt.new(1))
+        -(self + 1)
       end
     end
 
@@ -733,7 +739,7 @@ module BigNumber
         end
         result.set_size(-result.@size) if result.@size != 0
         if lost_bits
-          result = result - BigInt.new(1)
+          result = result - 1
         end
       end
 
@@ -861,7 +867,7 @@ module BigNumber
       result = BigInt.new(1)
       i = 2_i64
       while i <= n
-        result = result * BigInt.new(i)
+        result = result * i
         i += 1
       end
       result
@@ -902,7 +908,7 @@ module BigNumber
     def sqrt : BigInt
       raise ArgumentError.new("Square root of negative number") if negative?
       return BigInt.new if zero?
-      return BigInt.new(1) if self == BigInt.new(1)
+      return BigInt.new(1) if abs_size == 1 && @limbs[0] == 1_u64
 
       # Newton's method
       x = BigInt.new(1) << ((bit_length + 1) // 2)
@@ -915,15 +921,27 @@ module BigNumber
     end
 
     def prime? : Bool
-      return false if self <= BigInt.new(1)
-      return true if self == BigInt.new(2) || self == BigInt.new(3)
-      return false if even?
-      return false if divisible_by?(3)
+      # Quick checks without allocations
+      if abs_size <= 1
+        v = zero? ? 0_u64 : @limbs[0]
+        v = 0_u64 if negative?
+        return false if v <= 1
+        return true if v == 2 || v == 3
+        return false if v.even?
+        return false if v % 3 == 0
+      else
+        return false if negative?
+        return false if even?
+        return false if divisible_by?(3)
+      end
 
       # Write self-1 = 2^r * d
-      d = self - BigInt.new(1)
-      r = d.trailing_zeros_count.to_i32
-      d = d >> r
+      one = BigInt.new(1)
+      self_minus_1 = self - one
+      r = self_minus_1.trailing_zeros_count.to_i32
+      d = self_minus_1 >> r
+
+      two = BigInt.new(2)
 
       # Deterministic witnesses sufficient for numbers < 3.3e24
       witnesses = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]
@@ -932,11 +950,11 @@ module BigNumber
         a = BigInt.new(a_int)
         next if a >= self
         x = a.pow_mod(d, self)
-        next if x == BigInt.new(1) || x == self - BigInt.new(1)
+        next if (x.abs_size == 1 && x.@limbs[0] == 1_u64 && !x.negative?) || x == self_minus_1
         found = false
         (r - 1).times do
-          x = x.pow_mod(BigInt.new(2), self)
-          if x == self - BigInt.new(1)
+          x = x.pow_mod(two, self)
+          if x == self_minus_1
             found = true
             break
           end
