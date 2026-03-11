@@ -841,10 +841,30 @@ module BigNumber
     def gcd(other : BigInt) : BigInt
       a = self.abs
       b = other.abs
-      while !b.zero?
-        a, b = b, a % b
+      return b if a.zero?
+      return a if b.zero?
+
+      # Binary GCD (Stein's algorithm): uses only shifts and subtractions
+      a_shift = a.trailing_zeros_count.to_i32
+      b_shift = b.trailing_zeros_count.to_i32
+      k = Math.min(a_shift, b_shift)  # common factor of 2
+      a = a >> a_shift
+      b = b >> b_shift
+
+      loop do
+        # Both a and b are odd here
+        cmp = a <=> b
+        break if cmp == 0
+        if cmp > 0
+          a, b = b, a
+        end
+        # a <= b, both odd, so b - a is even and positive
+        b = b - a
+        break if b.zero?
+        b = b >> b.trailing_zeros_count.to_i32
       end
-      a
+
+      a << k
     end
 
     def gcd(other : Int) : Int
