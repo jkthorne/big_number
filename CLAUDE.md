@@ -29,10 +29,11 @@ bench/sanity_bin 2>&1                 # Run precompiled benchmark
 | Algorithm | Operation | Threshold |
 |-----------|-----------|-----------|
 | Schoolbook | Multiplication | < 32 limbs |
-| Karatsuba | Multiplication | 32-90 limbs |
-| Toom-Cook 3-way | Multiplication | > 90 limbs |
+| Karatsuba | Multiplication | 32-89 limbs |
+| Toom-Cook 3-way | Multiplication | >= 90 limbs |
 | Knuth Algorithm D | Division | All sizes |
 | Divide-and-conquer | Base conversion (to_s) | > 50 limbs |
+| Binary GCD (Stein's) | GCD | All sizes |
 | Newton's method | sqrt, root(n) | All sizes |
 | Miller-Rabin | Primality testing | Deterministic to 3.3e24 |
 
