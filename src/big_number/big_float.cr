@@ -236,6 +236,27 @@ module BigNumber
       @sign < 0
     end
 
+    @[AlwaysInline]
+    def nan? : Bool
+      false
+    end
+
+    @[AlwaysInline]
+    def infinite? : Int32?
+      nil
+    end
+
+    def integer? : Bool
+      return true if zero?
+      return true if @exponent >= 0
+      frac_bits = (-@exponent).to_i32
+      bit_len = @mantissa.bit_length
+      return true if frac_bits >= bit_len # mantissa is entirely fractional but zero? already handled
+      # Check if all fractional bits are zero
+      mask = (BigInt.new(1) << frac_bits) - BigInt.new(1)
+      (@mantissa & mask) == BigInt.new(0)
+    end
+
     # --- Comparison ---
 
     def <=>(other : BigFloat) : Int32
@@ -450,6 +471,24 @@ module BigNumber
       result
     end
 
+    def **(exp : BigInt) : BigFloat
+      return BigFloat.new(1, precision: @precision) if exp.zero?
+      if exp.negative?
+        return BigFloat.new(1, precision: @precision) / (self ** (-exp))
+      end
+      # Binary exponentiation
+      result = BigFloat.new(1, precision: @precision)
+      base = clone
+      e = exp.clone
+      one = BigInt.new(1)
+      while e > BigInt.new(0)
+        result = result * base if e.odd?
+        base = base * base
+        e = e >> 1
+      end
+      result
+    end
+
     # --- Rounding ---
 
     def floor : BigFloat
@@ -552,6 +591,36 @@ module BigNumber
       result
     end
 
+    def round_away : BigFloat
+      if positive?
+        (self + BigFloat.new(0.5, precision: @precision)).floor
+      elsif negative?
+        (self - BigFloat.new(0.5, precision: @precision)).ceil
+      else
+        clone
+      end
+    end
+
+    def round_even : BigFloat
+      return clone if zero?
+      if positive?
+        halfway = self + BigFloat.new(0.5, precision: @precision)
+      else
+        halfway = self - BigFloat.new(0.5, precision: @precision)
+      end
+      if halfway.integer?
+        # Check if halfway is even
+        hw_int = halfway.to_big_i
+        if hw_int.even?
+          halfway
+        else
+          halfway - BigFloat.new(sign.to_i32, precision: @precision)
+        end
+      else
+        halfway.trunc == self.trunc ? self.trunc : (positive? ? halfway.floor : halfway.ceil)
+      end
+    end
+
     # --- Conversions ---
 
     def to_f64 : Float64
@@ -638,6 +707,62 @@ module BigNumber
     def to_f : Float64
       to_f64
     end
+
+    def to_f32 : Float32
+      to_f64.to_f32
+    end
+
+    def to_f32! : Float32
+      to_f64.to_f32!
+    end
+
+    def to_f64! : Float64
+      to_f64
+    end
+
+    def to_f! : Float64
+      to_f64
+    end
+
+    def sign_i32 : Int32
+      @sign.to_i32
+    end
+
+    def to_i : Int32
+      to_i32
+    end
+
+    def to_i! : Int32
+      to_i32!
+    end
+
+    def to_u : UInt32
+      to_u32
+    end
+
+    def to_u! : UInt32
+      to_u32!
+    end
+
+    {% for info in [{Int8, "i8"}, {Int16, "i16"}, {Int32, "i32"}, {Int64, "i64"}] %}
+      def to_{{info[1].id}} : {{info[0]}}
+        to_big_i.to_{{info[1].id}}
+      end
+
+      def to_{{info[1].id}}! : {{info[0]}}
+        to_big_i.to_{{info[1].id}}!
+      end
+    {% end %}
+
+    {% for info in [{UInt8, "u8"}, {UInt16, "u16"}, {UInt32, "u32"}, {UInt64, "u64"}] %}
+      def to_{{info[1].id}} : {{info[0]}}
+        to_big_i.to_{{info[1].id}}
+      end
+
+      def to_{{info[1].id}}! : {{info[0]}}
+        to_big_i.to_{{info[1].id}}!
+      end
+    {% end %}
 
     def to_big_i : BigInt
       return BigInt.new if zero?
