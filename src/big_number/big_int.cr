@@ -1288,6 +1288,10 @@ module BigNumber
       BigRational.new(self)
     end
 
+    def to_big_d : BigDecimal
+      BigDecimal.new(self)
+    end
+
     def digits(base : Int = 10) : Array(Int32)
       raise ArgumentError.new("Can't request digits of negative number") if negative?
       raise ArgumentError.new("Invalid base #{base}") unless base >= 2

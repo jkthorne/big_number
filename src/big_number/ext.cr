@@ -7,6 +7,10 @@ struct Int
     BigNumber::BigRational.new(self)
   end
 
+  def to_big_d : BigNumber::BigDecimal
+    BigNumber::BigDecimal.new(self)
+  end
+
   def +(other : BigNumber::BigFloat) : BigNumber::BigFloat
     BigNumber::BigFloat.new(self) + other
   end
@@ -142,6 +146,10 @@ struct Float
   def to_big_i : BigNumber::BigInt
     BigNumber::BigInt.new(self)
   end
+
+  def to_big_d : BigNumber::BigDecimal
+    BigNumber::BigDecimal.new(self)
+  end
 end
 
 class String
@@ -155,6 +163,10 @@ class String
 
   def to_big_r : BigNumber::BigRational
     BigNumber::BigRational.new(self)
+  end
+
+  def to_big_d : BigNumber::BigDecimal
+    BigNumber::BigDecimal.new(self)
   end
 end
 
