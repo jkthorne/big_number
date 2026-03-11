@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Pure Crystal arbitrary-precision arithmetic library — zero C dependencies, no FFI, no GMP. Clean-room implementation of `BigInt`, `BigRational`, and `BigFloat`.
+Pure Crystal arbitrary-precision arithmetic library — zero C dependencies, no FFI, no GMP. Clean-room implementation of `BigInt`, `BigRational`, `BigFloat`, and `BigDecimal`.
 
 ## Commands
 
@@ -20,8 +20,9 @@ bench/sanity_bin 2>&1                 # Run precompiled benchmark
 ### Types
 
 - `BigNumber::BigInt` — Arbitrary-precision integers, sign-magnitude with 64-bit limbs
-- `BigNumber::BigRational` — Exact rational arithmetic, auto-canonicalized via GCD
+- `BigNumber::BigRational` — Exact rational arithmetic, auto-canonicalized via binary GCD
 - `BigNumber::BigFloat` — Arbitrary-precision floating point, configurable precision (default 128 bits)
+- `BigNumber::BigDecimal` — Fixed-scale decimal arithmetic (ported from stdlib)
 
 ### Key Algorithms
 
