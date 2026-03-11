@@ -298,8 +298,11 @@ Additional targeted tests:
 5. Fuzz-tested against libgmp with millions of random inputs
 6. `BigNumber::BigRational` works for exact rational arithmetic
 7. `BigNumber::BigFloat` works for arbitrary-precision floating point
+8. `BigNumber::BigDecimal` works for fixed-scale decimal arithmetic
+9. `require "big_number/stdlib"` is a drop-in replacement for `require "big"`
+10. JSON/YAML serialization works identically to stdlib
 
-We have (1), (2), (4) for add/mul, (5), (6), and (7). The remaining gap is
-(3): mul is 2.5-5.5x slower above 30 limbs, div is ~3x slower, and to_s is
-~5.5x slower. Items 3f-3h target closing those gaps. Add and BigRational are
-essentially at parity.
+We have (1), (2), (4) for add/mul, (5), (6), (7), (8), (9), and (10).
+The remaining gap is (3): mul is 2.5-5.5x slower above 30 limbs, div is ~3x
+slower, and to_s is ~5.5x slower. Items 3f-3h target closing those gaps. Add
+and BigRational are essentially at parity.
