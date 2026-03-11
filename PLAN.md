@@ -194,17 +194,24 @@ bottleneck in profiling (e.g., BigRational with very large numerators).
 
 ---
 
-## Step 4: Stdlib Integration
+## Step 4: Stdlib Integration — DONE
 
-See `STDLIB_REPLACEMENT_PLAN.md` for the full phase breakdown. Don't start
-this until Step 3 is done and we're within 2-3x of libgmp on all benchmarks.
+All 8 phases complete. See `STDLIB_REPLACEMENT_PLAN.md` for the full phase
+breakdown.
 
-Summary:
-- Phase 4: Port BigDecimal (uses BigInt internally, no GMP calls)
-- Phase 5: Wrapper structs (`BigInt < Int`, `BigFloat < Float`, etc.)
-- Phase 6: Primitive type extensions (Int#to_big_i, etc.)
-- Phase 7: JSON/YAML serialization
-- Phase 8: Compatibility tests
+- **Phase 1-3:** API gaps filled in BigInt, BigRational, BigFloat — DONE
+- **Phase 4:** BigDecimal ported from stdlib (`big_decimal.cr`, ~375 lines) — DONE
+- **Phase 5:** Wrapper structs (`stdlib.cr`, 1323 lines) — DONE
+  - `BigInt < Int`, `BigFloat < Float`, `BigRational < Number`, `BigDecimal < Number`
+  - Single `@inner` field delegates to BigNumber types; LLVM optimizes away wrapper
+  - `Number.expand_div` for cross-type division
+- **Phase 6:** Primitive extensions (`stdlib_ext.cr`, 464 lines) — DONE
+  - `Int#to_big_i`, `Float#to_big_f`, `String#to_big_*` etc.
+  - Math module: `isqrt`, `sqrt`, `pw2ceil`
+  - Random: `rand(BigInt)`, `rand(Range(BigInt, BigInt))`
+  - `Crystal::Hasher.reduce_num` for numeric hash equality
+- **Phase 7:** JSON/YAML serialization (`stdlib_json.cr`, `stdlib_yaml.cr`) — DONE
+- **Phase 8:** Full compatibility tests (`stdlib_compat_spec.cr`, 273 tests) — DONE
 
 ---
 
