@@ -55,6 +55,16 @@ bench/sanity_bin 2>&1                     # Run precompiled benchmark
 - `src/big_number/stdlib_json.cr` — JSON serialization
 - `src/big_number/stdlib_yaml.cr` — YAML deserialization
 
+### Stdlib Replacement
+
+Complete drop-in stdlib replacement via `require "big_number/stdlib"`:
+- Wrapper structs: `BigInt < Int`, `BigFloat < Float`, `BigRational < Number`, `BigDecimal < Number`
+- Primitive extensions: `Int#to_big_i`, `String#to_big_f`, etc.
+- Math module: `isqrt`, `sqrt`, `pw2ceil`
+- Random: `rand(BigInt)`, `rand(Range(BigInt, BigInt))`
+- Numeric hash equality: `BigInt.new(42).hash == 42.hash`
+- JSON/YAML serialization
+
 ### Testing Strategy
 
 Tests fuzz-compare every operation against Crystal's stdlib BigInt (libgmp) as an oracle. If we disagree with libgmp, we're wrong.
