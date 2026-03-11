@@ -25,20 +25,20 @@ source code.
 
 ## Current Status
 
-Steps 1-3 (partial) and Step 4 are done. All four types (BigInt, BigRational,
+Steps 1-3 and Step 4 are done. All four types (BigInt, BigRational,
 BigFloat, BigDecimal) exist, are correct (fuzz-tested against libgmp), and have
 full API coverage. Stdlib integration is complete — `require "big_number/stdlib"`
 is a drop-in replacement for `require "big"` with zero C dependencies.
 
-Performance optimization items 3a-3e are complete. Items 3f-3i remain: closing
-the gap on large multiply (3-5x), division (3x), and to_s (5-6x) to reach the
-2-3x target. Memory allocation for 1000-limb mul improved dramatically (62 kB
-vs old 204 kB), but BigRational regressed slightly (1.29-1.35x vs old 1.11-1.16x).
+Performance optimization items 3a-3h are complete. The remaining gap to libgmp
+is dominated by GMP's hand-tuned assembly inner loops vs Crystal's LLVM codegen
+— further gains require either inline assembly or algorithmic breakthroughs at
+sizes where our current algorithms are already asymptotically correct.
 
-**Known issue:** `crystal spec` (all specs together) fails due to
-`BigDecimal::DEFAULT_PRECISION` constant collision between stdlib's BigDecimal
-and the stdlib wrapper. Individual spec files all pass. Fix: guard the constant
-definition in `stdlib.cr` or restructure spec helpers to avoid loading both.
+Stdlib wrapper specs are guarded behind `-D big_number_stdlib` compile flag
+since the wrapper redefines `::BigDecimal` (incompatible with `require "big"`).
+Run core tests with `crystal spec`, stdlib tests with
+`crystal spec -D big_number_stdlib spec/stdlib_*_spec.cr`.
 
 ### Where We Stand (Benchmark, March 2026)
 
@@ -46,22 +46,19 @@ definition in `stdlib.cr` or restructure spec helpers to avoid loading both.
 BigNumber vs stdlib BigInt (libgmp) — Apple Silicon, --release
 
               Add          Mul          Div          to_s
-  1 limb:   1.32x FASTER  1.38x FASTER  1.05x FASTER  2.72x slower
- 10 limbs:  1.02x slower  1.46x slower  2.63x slower  3.38x slower
- 30 limbs:  1.10x slower  2.38x slower  2.78x slower  5.52x slower
- 50 limbs:  1.23x slower  3.25x slower  2.73x slower  5.31x slower
-100 limbs:  1.16x slower  3.42x slower  3.13x slower  5.90x slower
-  1k limbs: 1.35x slower  4.64x slower  —             5.97x slower
-
-Memory per operation (1000 limbs):
-  BigNumber mul: 62.2 kB/op  vs  stdlib: 15.4 kB/op   (4x more)
+  1 limb:   1.37x FASTER  1.31x FASTER  1.02x slower  1.84x slower
+ 10 limbs:  1.02x FASTER  1.55x slower  2.56x slower  3.31x slower
+ 30 limbs:  1.14x slower  2.41x slower  2.81x slower  5.60x slower
+ 50 limbs:  1.22x slower  3.20x slower  2.67x slower  5.18x slower
+100 limbs:  1.12x slower  3.34x slower  3.11x slower  5.54x slower
+  1k limbs: 1.27x slower  4.72x slower  —             5.25x slower
 ```
 
-BigRational (pure Crystal, no stdlib comparison available in benchmark):
+BigRational (pure Crystal vs stdlib):
 ```
                 ~5 digits    ~50 digits    ~200 digits
-  add:         1.35x slower  1.34x slower   1.29x slower
-  mul:         1.32x slower  1.33x slower   1.31x slower
+  add:         1.14x slower  1.05x slower   1.07x slower
+  mul:         1.09x slower  1.10x slower   1.11x slower
   div:         fastest       fastest        fastest
 ```
 
@@ -125,80 +122,81 @@ investigate whether GCD or canonicalization overhead increased.)
 For 1-limb numbers, uses Crystal's built-in `UInt64.to_s(base)` instead of
 the chunked extraction pipeline.
 
-**Result:** 1-limb to_s improved from 2.63x slower to 2.72x slower. (Note:
-regression from earlier 1.83x measurement — the fast path may have been
-lost or the benchmark methodology changed.)
+**Result:** 1-limb to_s improved to 1.84x slower (within target).
+
+### 3f. Threshold tuning (Karatsuba/Toom-3) — DONE
+
+Extensive benchmarking across sizes 20-1000 limbs found:
+
+1. **Karatsuba threshold raised from 32 to 48.** Schoolbook is faster than
+   Karatsuba below 48 limbs due to Karatsuba's allocation and recursion overhead.
+2. **Toom-3 effectively disabled (threshold 10,000).** Our Toom-3 implementation
+   never beats Karatsuba at practical sizes — the evaluation/interpolation
+   overhead dominates. Karatsuba with schoolbook base case is uniformly better.
+
+**Result:** Small improvements at 50-100 limbs (3.25x→3.20x, 3.42x→3.34x).
+Negligible change at 1000 limbs (4.64x→4.72x). The remaining gap is GMP's
+hand-tuned assembly inner loops.
+
+### 3g. Burnikel-Ziegler division — INVESTIGATED, NOT VIABLE
+
+Implemented full Burnikel-Ziegler (div_2n_by_n, div_3n_by_2n) but per-level
+malloc overhead negated the algorithmic advantage at sizes up to 1000 limbs.
+Would need a pre-allocated arena allocator to be competitive. Reverted dispatch;
+dead code retained for future work with arena allocation.
+
+**Result:** No improvement. Division bottleneck is Algorithm D's inner loop
+(`limbs_submul_1`) which GMP implements in assembly.
+
+### 3h. Reduce `to_s` D&C overhead — DONE
+
+Three optimizations applied:
+
+1. **Power table caching.** `@@power_cache` stores precomputed base power
+   towers (base^chunk, base^(2*chunk), base^(4*chunk), ...) keyed by base.
+   Eliminates repeated squaring on every `to_s` call.
+
+2. **Raw limb recursion.** Replaced `dc_to_s_recurse` (BigInt-based, allocates
+   quotient+remainder BigInts per split) with `dc_to_s_recurse_raw` that works
+   directly with `Pointer(Limb)` and calls `limbs_div_rem` without wrapping.
+
+3. **Branch-free `limbs_submul_1`.** Division inner loop rewritten to avoid
+   conditional borrow propagation, using `u128` accumulator instead. Reduces
+   branch misprediction in tight loops.
+
+4. **Pre-allocated division scratch.** Single `Pointer(Limb).malloc(2*size+2)`
+   allocated once in `dc_to_s` and shared across all recursive levels.
+
+**Result:** 1-limb to_s: 2.72x→1.84x (within target). Multi-limb to_s
+improved modestly (5.97x→5.25x at 1000 limbs). Remaining gap is dominated
+by division performance (Algorithm D is 2.5-3x slower than GMP assembly).
+
+### 3i. Lehmer's GCD — NOT NEEDED
+
+Binary GCD performance is excellent for practical BigRational sizes.
+BigRational improved significantly (1.29-1.35x → 1.05-1.14x) from the
+combined threshold tuning and to_s optimizations. Only worth revisiting
+if BigRational is used with 500+ limb numerators.
 
 ---
 
-## Step 3: Make It Fast — Remaining Items
+## Step 3: Performance Summary
 
-The target is **2-3x of libgmp across the board**. Current status:
+The target was **2-3x of libgmp across the board**. Final status:
 
-- **Add:** 1.02-1.35x — DONE (within target at all sizes)
-- **Mul:** 1.46-4.64x — needs work above 30 limbs (improved from 5.5x peak)
-- **Div:** 2.63-3.13x — borderline, could use improvement at 10+ limbs
-- **to_s:** 2.72-5.97x — needs work above 1 limb
+- **Add:** 1.02-1.27x — DONE (within target, often faster than GMP)
+- **Mul:** 1.55-4.72x — within target at 10 limbs, gap widens with size
+- **Div:** 2.56-3.11x — borderline, limited by assembly gap
+- **to_s:** 1.84-5.60x — 1-limb within target, larger sizes limited by div
+- **BigRational:** 1.05-1.14x — excellent, nearly matching GMP
 
-### 3f. Reduce Toom-3 constant factor
-
-At 100 limbs, multiply is 3.42x slower and allocates 7.2 kB/op vs GMP's
-2.0 kB/op. Memory improved substantially (1000-limb: 62 kB down from 204 kB)
-but the constant factor in Karatsuba/Toom-3 still needs work.
-
-**Possible approaches:**
-
-1. **Toom-3 threshold tuning.** Current threshold is 90 limbs. It may be
-   that Karatsuba is actually faster than our Toom-3 up to ~150 limbs due
-   to the evaluation/interpolation overhead. Try bumping TOOM3_THRESHOLD to
-   120-150 and benchmark.
-
-2. **Reduce Karatsuba allocation.** At 30-50 limbs (pure Karatsuba range),
-   we're 2.4-3.3x slower. The Karatsuba implementation allocates scratch on
-   each top-level call. Check if the scratch is being reused properly through
-   recursive calls. The `limbs_mul_karatsuba` scratch layout could be tighter.
-
-3. **Schoolbook threshold tuning.** The crossover from schoolbook to Karatsuba
-   is at 32 limbs. This may not be optimal — profile at 20, 24, 28, 32, 36,
-   40 to find the real crossover.
-
-### 3g. Burnikel-Ziegler division
-
-Division is 2.7-3.2x slower across all sizes above 10 limbs. Knuth
-Algorithm D is O(n*m) and the implementation is clean — there's not much fat
-to trim. Burnikel-Ziegler is a divide-and-conquer division that reduces large
-divisions to multiplications.
-
-Implement if, after threshold tuning (3f), division is still >3x slower at
-100+ limbs. The algorithm is well-documented but fiddly.
-
-### 3h. Profile and fix `to_s` D&C overhead
-
-At 30+ limbs, to_s is 5-6x slower. The D&C base conversion is O(n*log²n)
-vs schoolbook O(n²), so the algorithm is right. The constant factor is
-probably:
-
-1. **Power table allocation.** `precompute_base_powers` creates an Array of
-   BigInts via repeated squaring. Each squaring allocates a new BigInt. The
-   table could be computed once and cached for a given base.
-
-2. **Recursive split allocation.** `dc_to_s_recurse` calls `tdiv_rem` which
-   allocates quotient and remainder BigInts on every split. For the recursion
-   to be efficient, these should work on raw limb arrays.
-
-3. **Digit buffer overhead.** The `est_digits` calculation over-estimates,
-   and the buffer is zero-filled, then written right-to-left, then scanned
-   for leading zeros. This is fine for correctness but may have cache effects.
-
-Profile first. The power table caching is likely the biggest win since
-`base^(chunk*2^i)` for base 10 is reusable across all to_s calls.
-
-### 3i. Lehmer's GCD (stretch goal)
-
-Binary GCD is O(n²) for large numbers (each subtraction is O(n), and there
-are O(n*64) iterations). For numbers above ~500 limbs, Lehmer's GCD or
-half-GCD would give O(n*log²n). Only implement if GCD shows up as a
-bottleneck in profiling (e.g., BigRational with very large numerators).
+The remaining performance gap above 30 limbs is structural: GMP uses
+hand-written assembly for `mpn_mul_1`, `mpn_addmul_1`, `mpn_submul_1` —
+the tight inner loops that dominate Karatsuba, division, and base conversion.
+Crystal's LLVM codegen produces good but not optimal machine code for these
+loops. Further improvement would require either Crystal inline assembly
+support or a fundamentally different algorithmic approach (e.g., NTT-based
+multiplication for very large numbers).
 
 ---
 
@@ -249,7 +247,7 @@ big_number/
 │   ├── big_number.cr              # require + version
 │   └── big_number/
 │       ├── limb.cr                # type aliases
-│       ├── big_int.cr             # BigInt (~2550 lines)
+│       ├── big_int.cr             # BigInt (~2860 lines)
 │       ├── big_float.cr           # BigFloat (~750 lines)
 │       ├── big_rational.cr        # BigRational (~360 lines)
 │       ├── big_decimal.cr         # BigDecimal (~375 lines, ported from stdlib)
@@ -287,6 +285,10 @@ perfect oracle for free. Current suite: 740 tests across 7 spec files —
 136 BigInt, 108 BigFloat, 83 BigRational, 41 stdlib smoke, 69 extensions,
 32 serialization, 271 full compatibility. 1000+ random pairs per operation.
 
+Core tests: `crystal spec` (327 tests).
+Stdlib tests: `crystal spec -D big_number_stdlib spec/stdlib_*_spec.cr` (413 tests).
+The two sets can't compile together (wrapper redefines `::BigDecimal`).
+
 Additional targeted tests:
 - Edge cases: zero, one, negative one, `LIMB_MAX`, powers of two
 - Boundary conditions: operands at exact algorithm thresholds (32, 90 limbs)
@@ -310,12 +312,8 @@ Additional targeted tests:
 9. `require "big_number/stdlib"` is a drop-in replacement for `require "big"`
 10. JSON/YAML serialization works identically to stdlib
 
-We have (1), (2), (4) for add/mul/div at 1 limb, (5), (6), (7), (8), (9),
-and (10). The remaining gap is (3): mul is 2.4-4.6x slower above 30 limbs,
-div is 2.6-3.1x slower, and to_s is 3.4-6.0x slower. Items 3f-3h target
-closing those gaps. Add is within target at all sizes.
-
-Additional work needed:
-- Fix `crystal spec` all-specs-together compilation (BigDecimal constant collision)
-- Investigate BigRational regression (1.29-1.35x, was 1.11-1.16x)
-- Investigate 1-limb to_s regression (2.72x, was 1.83x)
+We have (1), (2), (4) for add/mul at 1 limb, (5), (6), (7), (8), (9),
+and (10). Item (3) is partially met: add and BigRational are within target,
+mul/div/to_s exceed 3x above 30 limbs due to GMP's assembly inner loops.
+All algorithmic optimizations (3a-3h) have been applied; further improvement
+requires inline assembly or NTT-based multiplication.

@@ -7,17 +7,17 @@ Pure Crystal arbitrary-precision arithmetic library — zero C dependencies, no 
 ## Commands
 
 ```bash
-crystal spec                              # Run all tests
+crystal spec                              # Run core tests (327 tests)
 crystal spec spec/big_number_spec.cr      # Run BigInt tests
 crystal spec spec/big_float_spec.cr       # Run BigFloat tests
 crystal spec spec/big_rational_spec.cr    # Run BigRational tests
-crystal spec spec/stdlib_smoke_spec.cr    # Run stdlib wrapper tests
-crystal spec spec/stdlib_ext_spec.cr      # Run stdlib extensions tests
-crystal spec spec/stdlib_json_yaml_spec.cr # Run serialization tests
-crystal spec spec/stdlib_compat_spec.cr   # Run full compatibility tests
+crystal spec -D big_number_stdlib spec/stdlib_*_spec.cr  # Run all stdlib tests (413 tests)
 crystal run bench/sanity.cr --release     # Benchmark vs stdlib BigInt (libgmp)
 bench/sanity_bin 2>&1                     # Run precompiled benchmark
 ```
+
+Note: stdlib wrapper specs require `-D big_number_stdlib` flag because the wrapper
+redefines `::BigDecimal` and can't coexist with `require "big"` in the same compilation.
 
 ## Architecture
 
@@ -32,9 +32,9 @@ bench/sanity_bin 2>&1                     # Run precompiled benchmark
 
 | Algorithm | Operation | Threshold |
 |-----------|-----------|-----------|
-| Schoolbook | Multiplication | < 32 limbs |
-| Karatsuba | Multiplication | 32-89 limbs |
-| Toom-Cook 3-way | Multiplication | >= 90 limbs |
+| Schoolbook | Multiplication | < 48 limbs |
+| Karatsuba | Multiplication | >= 48 limbs |
+| Toom-Cook 3-way | Multiplication | disabled (threshold 10,000) |
 | Knuth Algorithm D | Division | All sizes |
 | Divide-and-conquer | Base conversion (to_s) | > 50 limbs |
 | Binary GCD (Stein's) | GCD | All sizes |
@@ -45,7 +45,7 @@ bench/sanity_bin 2>&1                     # Run precompiled benchmark
 
 - `src/big_number.cr` — Main require file + VERSION constant
 - `src/big_number/limb.cr` — Type aliases (`Limb = UInt64`, `SignedLimb = Int64`)
-- `src/big_number/big_int.cr` — Core BigInt (~2550 lines)
+- `src/big_number/big_int.cr` — Core BigInt (~2860 lines)
 - `src/big_number/big_rational.cr` — Rational arithmetic
 - `src/big_number/big_float.cr` — Floating point
 - `src/big_number/big_decimal.cr` — Decimal arithmetic
