@@ -139,6 +139,68 @@ module BigNumber
       self / BigRational.new(other)
     end
 
+    def //(other : BigRational) : BigRational
+      raise DivisionByZeroError.new if other.numerator.zero?
+      BigRational.new((@numerator * other.denominator) // (@denominator * other.numerator))
+    end
+
+    def //(other : Int) : BigRational
+      raise DivisionByZeroError.new if other == 0
+      BigRational.new(@numerator // (@denominator * BigInt.new(other)))
+    end
+
+    def //(other : BigInt) : BigRational
+      self // BigRational.new(other)
+    end
+
+    def %(other : BigRational) : BigRational
+      raise DivisionByZeroError.new if other.numerator.zero?
+      BigRational.new(
+        (@numerator * other.denominator) % (@denominator * other.numerator),
+        @denominator * other.denominator
+      )
+    end
+
+    def %(other : Int) : BigRational
+      raise DivisionByZeroError.new if other == 0
+      BigRational.new(@numerator % (@denominator * BigInt.new(other)), @denominator)
+    end
+
+    def %(other : BigInt) : BigRational
+      self % BigRational.new(other)
+    end
+
+    def tdiv(other : BigRational) : BigRational
+      raise DivisionByZeroError.new if other.numerator.zero?
+      BigRational.new((@numerator * other.denominator).tdiv(@denominator * other.numerator))
+    end
+
+    def tdiv(other : Int) : BigRational
+      raise DivisionByZeroError.new if other == 0
+      BigRational.new(@numerator.tdiv(@denominator * BigInt.new(other)))
+    end
+
+    def tdiv(other : BigInt) : BigRational
+      tdiv(BigRational.new(other))
+    end
+
+    def remainder(other : BigRational) : BigRational
+      raise DivisionByZeroError.new if other.numerator.zero?
+      BigRational.new(
+        (@numerator * other.denominator).remainder(@denominator * other.numerator),
+        @denominator * other.denominator
+      )
+    end
+
+    def remainder(other : Int) : BigRational
+      raise DivisionByZeroError.new if other == 0
+      BigRational.new(@numerator.remainder(@denominator * BigInt.new(other)), @denominator)
+    end
+
+    def remainder(other : BigInt) : BigRational
+      remainder(BigRational.new(other))
+    end
+
     def **(exponent : Int) : BigRational
       if exponent == 0
         return BigRational.new(1)
@@ -174,6 +236,14 @@ module BigNumber
     end
 
     def <=>(other : BigInt) : Int32
+      self <=> BigRational.new(other)
+    end
+
+    def <=>(other : Float::Primitive) : Int32?
+      return nil if other.nan?
+      if other.infinite?
+        return other > 0 ? -1 : 1
+      end
       self <=> BigRational.new(other)
     end
 
@@ -218,6 +288,45 @@ module BigNumber
       BigRational.new(@denominator.clone, @numerator.clone)
     end
 
+    @[AlwaysInline]
+    def sign : Int32
+      @numerator.sign
+    end
+
+    def floor : BigRational
+      BigRational.new(@numerator // @denominator)
+    end
+
+    def ceil : BigRational
+      BigRational.new(-(-@numerator // @denominator))
+    end
+
+    def trunc : BigRational
+      BigRational.new(@numerator.tdiv(@denominator))
+    end
+
+    def round_away : BigRational
+      rem2 = @numerator.remainder(@denominator).abs * BigInt.new(2)
+      x = BigRational.new(@numerator.tdiv(@denominator))
+      x += sign if rem2 >= @denominator
+      x
+    end
+
+    def round_even : BigRational
+      rem2 = @numerator.remainder(@denominator).abs * BigInt.new(2)
+      x = BigRational.new(@numerator.tdiv(@denominator))
+      x += sign if rem2 > @denominator || (rem2 == @denominator && x.numerator.odd?)
+      x
+    end
+
+    def >>(other : Int) : BigRational
+      BigRational.new(@numerator, @denominator * (BigInt.new(1) << other))
+    end
+
+    def <<(other : Int) : BigRational
+      BigRational.new(@numerator * (BigInt.new(1) << other), @denominator.clone)
+    end
+
     # --- Conversions ---
 
     def to_f64 : Float64
@@ -226,6 +335,66 @@ module BigNumber
 
     def to_f : Float64
       to_f64
+    end
+
+    def to_f32 : Float32
+      to_f64.to_f32
+    end
+
+    def to_f32! : Float32
+      to_f64.to_f32
+    end
+
+    def to_f64! : Float64
+      to_f64
+    end
+
+    def to_f! : Float64
+      to_f64
+    end
+
+    def to_i : Int32
+      to_i32
+    end
+
+    def to_i8 : Int8
+      to_f64.to_i8
+    end
+
+    def to_i16 : Int16
+      to_f64.to_i16
+    end
+
+    def to_i32 : Int32
+      to_f64.to_i32
+    end
+
+    def to_i64 : Int64
+      to_f64.to_i64
+    end
+
+    def to_u8 : UInt8
+      to_f64.to_u8
+    end
+
+    def to_u16 : UInt16
+      to_f64.to_u16
+    end
+
+    def to_u32 : UInt32
+      to_f64.to_u32
+    end
+
+    def to_u64 : UInt64
+      to_f64.to_u64
+    end
+
+    def to_big_i : BigInt
+      @numerator.tdiv(@denominator)
+    end
+
+    def to_big_f(*, precision : Int32 = BigFloat.default_precision) : BigFloat
+      BigFloat.new(@numerator, precision: precision) / BigFloat.new(@denominator, precision: precision)
     end
 
     def to_s : String
@@ -242,12 +411,30 @@ module BigNumber
       end
     end
 
+    def to_s(base : Int) : String
+      String.build { |io| to_s(io, base) }
+    end
+
+    def to_s(io : IO, base : Int) : Nil
+      if @denominator == BigInt.new(1)
+        @numerator.to_s(io, base)
+      else
+        @numerator.to_s(io, base)
+        io << '/'
+        @denominator.to_s(io, base)
+      end
+    end
+
     def inspect(io : IO) : Nil
       to_s(io)
     end
 
     def to_big_r : BigRational
       self
+    end
+
+    def to_big_d : BigDecimal
+      BigDecimal.new(self)
     end
 
     def hash(hasher)
