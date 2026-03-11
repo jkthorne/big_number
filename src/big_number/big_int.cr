@@ -1267,12 +1267,18 @@ module BigNumber
     def to_f64 : Float64
       return 0.0 if zero?
       n = abs_size
-      result = 0.0
-      i = n - 1
-      while i >= 0
-        result = result * (UInt64::MAX.to_f64 + 1.0) + @limbs[i].to_f64
-        i -= 1
+      if n == 1
+        return negative? ? -@limbs[0].to_f64 : @limbs[0].to_f64
       end
+      # Use top 2 limbs + exponent for correct rounding at any size.
+      # Float64 has 53 bits of mantissa; 2 limbs = 128 bits is more than enough.
+      hi = @limbs[n - 1].to_f64
+      lo = @limbs[n - 2].to_f64
+      # hi * 2^64 + lo, then shift by the remaining limbs
+      result = hi * (UInt64::MAX.to_f64 + 1.0) + lo
+      # Scale by 2^(64*(n-2)) for the lower limbs we skipped
+      exp = (n - 2) * 64
+      result = result * 2.0 ** exp
       negative? ? -result : result
     end
 
