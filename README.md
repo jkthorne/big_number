@@ -121,13 +121,42 @@ puts 0.5.to_big_r
 | Binary exponentiation | `**`, `pow_mod` | O(log exp) | All sizes |
 | Euclidean | `gcd` | O(n) | All sizes |
 
-## Benchmarks
+## Performance
 
-The `bench/sanity.cr` benchmark compares against Crystal's stdlib `BigInt` (which wraps libgmp) at various operand sizes:
+Compared against Crystal's stdlib `BigInt` (which wraps libgmp). Ratios show BigNumber time relative to stdlib -- lower is better, and values under 1.0x mean BigNumber is faster.
+
+> **Last updated:** 2026-03-10 | Crystal 1.19.1 | Apple M-series | `crystal run bench/sanity.cr --release`
+
+### BigInt
+
+| Operation | 1 limb (19 dig) | 10 limbs (190 dig) | 50 limbs (950 dig) | 100 limbs (1.9k dig) | 1000 limbs (19k dig) |
+|-----------|:---:|:---:|:---:|:---:|:---:|
+| **add** | **0.71x** | 1.01x | 1.23x | 1.19x | 1.35x |
+| **mul** | **0.73x** | 1.45x | 3.09x | 5.02x | 5.59x |
+| **div** | **0.99x** | 2.67x | 2.68x | 3.15x | -- |
+| **to_s** | 2.70x | 3.37x | 5.32x | 5.87x | 5.98x |
+
+**Key takeaways:**
+- Single-limb arithmetic (numbers up to ~19 digits) is **faster than GMP** -- no FFI overhead
+- Addition stays within 1.0-1.4x across all sizes
+- Multiplication is competitive at small sizes; gap widens at 100+ limbs (no FFT yet)
+- `to_s` base conversion is the widest gap -- GMP uses a highly optimized recursive algorithm
+
+### BigRational
+
+| Operation | 5 digits | 50 digits | 200 digits |
+|-----------|:---:|:---:|:---:|
+| **add** | 1.36x | 1.30x | 1.29x |
+| **mul** | 1.34x | 1.27x | 1.29x |
+| **div** | fastest | fastest | fastest |
+
+### Reproducing
 
 ```
 crystal run bench/sanity.cr --release
 ```
+
+<!-- BENCH:UPDATE - To refresh these tables, run the benchmark above and update the ratios -->
 
 ## Development
 
