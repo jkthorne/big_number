@@ -1001,7 +1001,11 @@ module BigNumber
       io << '-' if negative?
 
       n = abs_size
-      if n >= DC_TO_S_THRESHOLD
+      if n == 1 && precision <= 1
+        # Single-limb fast path: use Crystal's built-in integer-to-string
+        s = @limbs[0].to_s(base)
+        io << (upcase ? s.upcase : s)
+      elsif n >= DC_TO_S_THRESHOLD
         BigInt.dc_to_s(io, @limbs, n, base.to_i32, precision.to_i32, upcase)
       else
         BigInt.simple_to_s(io, @limbs, n, base.to_i32, precision.to_i32, upcase)
