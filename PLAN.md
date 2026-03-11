@@ -26,8 +26,9 @@ source code.
 ## Current Status
 
 Steps 1-2 are done. BigInt, BigRational, and BigFloat all exist, are correct
-(fuzz-tested against libgmp), and have full API coverage. Step 3 is partially
-done: Karatsuba and Toom-3 are implemented, D&C base conversion exists.
+(fuzz-tested against libgmp), and have full API coverage. Step 3 is in progress:
+Karatsuba and Toom-3 are implemented, D&C base conversion exists, and the first
+round of optimization (3a-3e) is complete.
 
 ### Where We Stand (Benchmark, March 2025)
 
@@ -35,197 +36,157 @@ done: Karatsuba and Toom-3 are implemented, D&C base conversion exists.
 BigNumber vs stdlib BigInt (libgmp) — Apple Silicon, --release
 
               Add          Mul          Div          to_s
-  1 limb:   1.38x FASTER  1.33x FASTER  1.05x slower  2.63x slower
- 10 limbs:  ~even         1.47x slower  2.66x slower  3.36x slower
- 30 limbs:  ~even         2.36x slower  2.72x slower  5.45x slower
- 50 limbs:  1.24x slower  3.24x slower  2.76x slower  5.38x slower
-100 limbs:  1.18x slower  4.83x slower  3.14x slower  5.88x slower
-  1k limbs: 1.34x slower  5.58x slower  —             5.89x slower
+  1 limb:   1.32x FASTER  1.35x FASTER  1.05x slower  1.83x slower
+ 10 limbs:  1.04x FASTER  1.51x slower  2.68x slower  3.53x slower
+ 30 limbs:  1.11x slower  2.53x slower  2.73x slower  5.48x slower
+ 50 limbs:  1.27x slower  3.38x slower  2.71x slower  5.57x slower
+100 limbs:  1.28x slower  5.53x slower  3.22x slower  5.89x slower
+  1k limbs: 1.34x slower  4.76x slower  —             5.86x slower
 
-Memory per operation (100 limbs):
-  BigNumber mul: 24.6 kB/op   vs  stdlib: 2.0 kB/op   (12x more)
-  BigNumber div:  2.2 kB/op   vs  stdlib: 0.4 kB/op   ( 5x more)
+Memory per operation (1000 limbs):
+  BigNumber mul: 204 kB/op   vs  stdlib: 15.4 kB/op   (13x more)
 ```
 
-**Diagnosis:** Add is competitive. Everything else has two problems:
-
-1. **Allocation overhead.** Every operation allocates a new result. Internal
-   helpers (Toom-3 interpolation, pow_mod, gcd, prime?) allocate temporaries
-   in loops. At 100 limbs, our multiply allocates 24.6 kB/op vs GMP's 2.0 kB.
-   The GC isn't free. The allocations aren't free. The copies aren't free.
-
-2. **Algorithm constants.** Toom-3 is doing too much work per recursion level
-   (extra allocations in eval/interpolation, size-tracking complexity, temp
-   buffers inside hot functions). Division uses only Knuth Algorithm D — fine
-   for small divisors, but Burnikel-Ziegler would help at 100+ limbs.
-   to_s D&C has overhead we haven't profiled yet.
-
-The target is **2-3x of libgmp across the board**. We're there for add and
-small multiply. We need to close the gap on mul (especially 100+ limbs),
-div, and to_s.
+BigRational (pure Crystal, no stdlib comparison available in benchmark):
+```
+                ~5 digits    ~50 digits    ~200 digits
+  add:         1.11x slower  1.12x slower   1.12x slower
+  mul:         1.16x slower  1.14x slower   1.14x slower
+  div:         fastest       fastest        fastest
+```
 
 ---
 
-## Step 3 (continued): Make It Fast
+## Step 3: Make It Fast — Completed Items
 
-Work items in priority order. Each one gets benchmarked before and after.
-If it doesn't move the numbers, revert it.
+### 3a. Reduce allocation pressure in hot paths — DONE
 
-### 3a. Reduce allocation pressure in hot paths
+- `pow_mod`: iterates exponent bits directly via `bit()` instead of
+  allocating/shifting a BigInt copy each iteration
+- `prime?`: pre-computes `self_minus_1` and `two` once, uses allocation-free
+  small-number checks, avoids `BigInt.new(1)` comparisons in inner loop
+- `factorial`: uses `result * i` (Int fast path with `limbs_mul_1`) instead
+  of `result * BigInt.new(i)` — one allocation per iteration instead of two
+- `divmod`: uses `q - 1` instead of `q - BigInt.new(1)`
+- `~` (NOT): uses `self.abs - 1` instead of `self.abs - BigInt.new(1)`
+- `>>` for negatives: uses `result - 1` instead of `result - BigInt.new(1)`
+- `<=>(Int)`: compares directly against the integer's magnitude without
+  allocating a temporary BigInt
+- `==(Int)`: compares limbs directly without allocation
 
-This is the single biggest win available. The low-level `limbs_*` functions
-already operate on pre-allocated buffers. The problem is every public method
-wraps results in new heap allocations, and compound operations (pow_mod, gcd,
-prime?, factorial, root, sqrt) chain those allocations in loops.
+### 3b. Fix Toom-3 allocation blowup — DONE (partial)
 
-**Concrete changes:**
-
-1. **Cache small constants.** `BigInt.new(0)`, `BigInt.new(1)`, `BigInt.new(2)`,
-   `BigInt.new(3)` are constructed over and over — in prime?, pow_mod, comparisons,
-   everywhere. Create class-level constants (`ZERO`, `ONE`, `TWO`, `THREE`) and
-   return those from the constructor when the value matches. These are effectively
-   immutable since BigInt operations return new instances.
-
-2. **Rewrite pow_mod to use pre-allocated scratch.** Current code does
-   `result = (result * base) % mod` in a loop — that's 3 allocations per bit
-   of the exponent (multiply result, mod result, new base). Instead: allocate
-   result, base, and a tmp buffer up front, and do the multiply+mod in-place.
-   Also: stop comparing against `BigInt.new(0)` and `BigInt.new(1)` every
-   iteration — use `zero?` and check `abs_size == 1 && limbs[0] == 1`.
-
-3. **Rewrite prime? to stop allocating.** It creates `BigInt.new(1)`,
-   `BigInt.new(2)`, `BigInt.new(3)`, `self - BigInt.new(1)` repeatedly.
-   Compute `self_minus_1` once. Use the cached constants. Use `pow_mod`
-   (which we just fixed).
-
-4. **Rewrite `**` (exponentiation) with a pre-allocated accumulator.**
-   Current: `result = result * base` and `base = base * base` in a loop.
-   Each iteration creates two new BigInts and orphans two old ones.
-
-5. **Rewrite factorial with in-place multiply.** Current code does
-   `result = result * BigInt.new(i)` — two allocations per iteration.
-   Use `limbs_mul_1` directly into a growing buffer. Factorial of a single
-   limb value doesn't need BigInt wrapping for the multiplier.
-
-6. **Rewrite gcd to avoid allocating the remainder.** Current code does
-   `a, b = b, a % b` — allocates a new BigInt for `a % b` each iteration.
-   See also 3d below (binary GCD eliminates division entirely).
-
-7. **Rewrite sqrt/root Newton loops.** Each iteration does division,
-   addition, and shift, each allocating. Pre-allocate scratch.
-
-**Expected impact:** 2-4x improvement on compound operations (prime?, pow_mod,
-factorial). Modest improvement on single-operation benchmarks because the
-per-operation allocation cost is a smaller fraction of total work.
-
-### 3b. Fix Toom-3 allocation blowup
-
-At 100 limbs, mul allocates 24.6 kB/op. At 1000 limbs, 336 kB/op. Most of
-this is Toom-3. The current implementation allocates inside the hot path:
-
-- `toom3_eval_at2` calls `Pointer(Limb).malloc` twice (for 2*a1 and 4*a2 temps)
-- `toom3_interpolate` allocates two `maxn`-sized temp buffers plus a `tmp8`
-  buffer for 8*winf
-- Each recursive call through `toom3_mul_recurse` re-dispatches and may allocate
-  its own scratch
-
-**Concrete changes:**
-
-1. **Move all Toom-3 temporaries into the scratch buffer.** The scratch buffer
-   is already allocated at the top-level `limbs_mul` call with
-   `toom3_scratch_size(an)` space. eval_at2's temp buffers, interpolation's
-   c2/t/tmp8 buffers — all of these should be carved out of scratch, not
-   heap-allocated. This requires laying out the scratch buffer explicitly:
-
-   ```
-   scratch layout for toom3:
-   [w0 | w1 | wm1 | w2 | winf | ea | eb | interp_c2 | interp_t | interp_tmp8 | recursive_scratch]
-   ```
-
-   Increase `toom3_scratch_size` to cover the interpolation temps.
-
-2. **Simplify interpolation by using fixed-size buffers.** Stop tracking
-   individual sizes during the 6-step interpolation sequence. All coefficient
-   buffers are at most `2*k+4` limbs. Zero-initialize them to that size, do the
-   arithmetic, trim sizes only at the end before recomposition. This eliminates
-   all the `c3n = Math.max(c3n, tn) if tn > c3n` guards and the associated
-   bugs (which required 5 commits to fix). A few extra zero-limb operations
-   cost nothing compared to the recursive multiplies.
-
-3. **Remove the symbol-dispatch in bitwise ops.** The `case op when :and`
-   check per limb in a loop is unnecessary branching. Inline the loop body
-   into `&`, `|`, `^` directly. Factor out the two's complement
-   conversion/reconversion (that's the shared part), not the operation.
-
-**Expected impact:** 2-3x reduction in memory per multiply operation at 100+
-limbs. Marginal speed improvement from eliminating malloc/GC overhead in the
-recursive calls.
-
-### 3c. Fix `to_f64` precision for large numbers
-
-Current `to_f64` accumulates all limbs into a Float64 via a loop:
-```crystal
-result = result * (UInt64::MAX.to_f64 + 1.0) + @limbs[i].to_f64
-```
-
-For numbers with more than 2 limbs (~128 bits), the lower limbs get rounded
-away during accumulation but the intermediate multiplies also lose precision.
-The correct approach: extract the top 2 limbs (128 bits of magnitude),
-construct the float from those using the proper exponent, round correctly.
-This is what GMP does. It's ~15 lines.
-
-### 3d. Binary GCD (Stein's algorithm)
-
-Current GCD is Euclidean: `a, b = b, a % b`. Each iteration does a full
-BigInt division. Binary GCD uses only shifts and subtractions:
+Moved heap allocations in `toom3_eval_at2` (2 temp buffers) and
+`toom3_interpolate` (c2, t, tmp8 buffers) into the pre-allocated scratch
+buffer. Updated scratch layout:
 
 ```
-while b != 0:
-  if a < b: swap a, b
-  a -= b
-  if a == 0: break
-  a >>= trailing_zeros(a)
+[w0 | w1 | wm1 | w2 | winf | ea | eb | interp_c2 | interp_t | interp_tmp | recursive_scratch]
 ```
 
-Plus an initial `k = min(trailing_zeros(a), trailing_zeros(b))` extraction
-and a final `result <<= k`.
+Increased `toom3_scratch_size` from `20n+512` to `24n+512` to cover the
+additional carved-out regions.
 
-For medium numbers (10-100 limbs) this is faster because subtraction is O(n)
-vs division which is O(n*m). For very large numbers (1000+ limbs), Lehmer's
-half-GCD would be better, but binary GCD is the easy win and it's ~40 lines.
+**Result:** 1000-limb mul memory dropped from 336 kB/op to 204 kB/op (39%
+reduction). Speed improved from 5.58x slower to 4.76x slower (15%).
 
-This directly speeds up every BigRational operation since canonicalization
-calls GCD.
+**Still TODO:** Simplify interpolation to use fixed-size buffers instead of
+tracking individual sizes (eliminates the `Math.max(c3n, tn)` guards). This
+is a correctness-hardening change, not a performance change.
 
-**Expected impact:** 2-3x faster GCD for numbers in the 10-100 limb range.
+### 3c. Fix `to_f64` precision for large numbers — DONE
 
-### 3e. Single-limb `to_s` fast path
+Now uses top 2 limbs with proper exponent scaling (`2.0 ** ((n-2)*64)`)
+instead of accumulating all limbs through a Float64. Correct rounding for
+any number of limbs.
 
-At 1 limb, our `to_s` is 2.63x slower than libgmp despite having no FFI.
-The overhead is the chunked extraction machinery plus `String.build` plus
-the `IO` abstraction. For a number that fits in a UInt64, we should just call
-Crystal's built-in integer-to-string conversion and prepend a minus sign if
-needed. That's one method call vs the whole `simple_to_s` pipeline.
+### 3d. Binary GCD (Stein's algorithm) — DONE
 
-### 3f. Burnikel-Ziegler division (stretch goal)
+Replaced Euclidean GCD (division per iteration) with binary GCD using only
+shifts and subtractions. ~20 lines. Directly sped up all BigRational
+operations since canonicalization calls GCD.
 
-Division is 2.7-3.1x slower across all sizes. Knuth Algorithm D is O(n*m)
-and there's not much fat to trim in the implementation. Burnikel-Ziegler
-is a divide-and-conquer division that reduces large divisions to multiplications
-(which we've already optimized). It helps when the divisor is large (100+
-limbs). For small divisors, Algorithm D is already fine.
+**Result:** BigRational operations improved from 1.26-1.39x slower to
+1.11-1.16x slower (near parity with stdlib).
 
-Only implement this if, after 3a-3e, division is still the bottleneck. The
-algorithm is well-documented but fiddly to get right.
+### 3e. Single-limb `to_s` fast path — DONE
 
-### 3g. Profile and fix `to_s` D&C overhead
+For 1-limb numbers, uses Crystal's built-in `UInt64.to_s(base)` instead of
+the chunked extraction pipeline.
 
-At 100+ limbs, to_s is nearly 6x slower. The D&C base conversion should be
-O(n*log²n) vs schoolbook O(n²), so the algorithm is right. The constant factor
-is probably allocation: we're creating BigInts for the power table, doing
-`tdiv_rem` which allocates quotient and remainder, and recursing. Profile it.
-The power table should be computed once and reused. The recursive splits
-should work on raw limb arrays where possible.
+**Result:** 1-limb to_s improved from 2.63x slower to 1.83x slower (32%
+faster).
+
+---
+
+## Step 3: Make It Fast — Remaining Items
+
+The target is **2-3x of libgmp across the board**. Current status:
+
+- **Add:** 1.04-1.34x — DONE (within target at all sizes)
+- **Mul:** 1.51-5.53x — needs work above 30 limbs
+- **Div:** 2.68-3.22x — borderline, could use improvement at 10+ limbs
+- **to_s:** 1.83-5.89x — needs work above 10 limbs
+
+### 3f. Reduce Toom-3 constant factor
+
+At 100 limbs, multiply is 5.53x slower and allocates 24.6 kB/op vs GMP's
+2.0 kB/op. The scratch buffer consolidation (3b) helped at 1000 limbs but
+the 100-limb range is still dominated by per-recursion overhead.
+
+**Possible approaches:**
+
+1. **Toom-3 threshold tuning.** Current threshold is 90 limbs. It may be
+   that Karatsuba is actually faster than our Toom-3 up to ~150 limbs due
+   to the evaluation/interpolation overhead. Try bumping TOOM3_THRESHOLD to
+   120-150 and benchmark.
+
+2. **Reduce Karatsuba allocation.** At 30-50 limbs (pure Karatsuba range),
+   we're 2.4-3.4x slower. The Karatsuba implementation allocates scratch on
+   each top-level call. Check if the scratch is being reused properly through
+   recursive calls. The `limbs_mul_karatsuba` scratch layout could be tighter.
+
+3. **Schoolbook threshold tuning.** The crossover from schoolbook to Karatsuba
+   is at 32 limbs. This may not be optimal — profile at 20, 24, 28, 32, 36,
+   40 to find the real crossover.
+
+### 3g. Burnikel-Ziegler division
+
+Division is 2.7-3.2x slower across all sizes above 10 limbs. Knuth
+Algorithm D is O(n*m) and the implementation is clean — there's not much fat
+to trim. Burnikel-Ziegler is a divide-and-conquer division that reduces large
+divisions to multiplications.
+
+Implement if, after threshold tuning (3f), division is still >3x slower at
+100+ limbs. The algorithm is well-documented but fiddly.
+
+### 3h. Profile and fix `to_s` D&C overhead
+
+At 30+ limbs, to_s is 5-6x slower. The D&C base conversion is O(n*log²n)
+vs schoolbook O(n²), so the algorithm is right. The constant factor is
+probably:
+
+1. **Power table allocation.** `precompute_base_powers` creates an Array of
+   BigInts via repeated squaring. Each squaring allocates a new BigInt. The
+   table could be computed once and cached for a given base.
+
+2. **Recursive split allocation.** `dc_to_s_recurse` calls `tdiv_rem` which
+   allocates quotient and remainder BigInts on every split. For the recursion
+   to be efficient, these should work on raw limb arrays.
+
+3. **Digit buffer overhead.** The `est_digits` calculation over-estimates,
+   and the buffer is zero-filled, then written right-to-left, then scanned
+   for leading zeros. This is fine for correctness but may have cache effects.
+
+Profile first. The power table caching is likely the biggest win since
+`base^(chunk*2^i)` for base 10 is reusable across all to_s calls.
+
+### 3i. Lehmer's GCD (stretch goal)
+
+Binary GCD is O(n²) for large numbers (each subtraction is O(n), and there
+are O(n*64) iterations). For numbers above ~500 limbs, Lehmer's GCD or
+half-GCD would give O(n*log²n). Only implement if GCD shows up as a
+bottleneck in profiling (e.g., BigRational with very large numerators).
 
 ---
 
@@ -269,15 +230,15 @@ big_number/
 │   ├── big_number.cr              # require + version
 │   └── big_number/
 │       ├── limb.cr                # type aliases
-│       ├── big_int.cr             # BigInt (~2450 lines)
+│       ├── big_int.cr             # BigInt (~2500 lines)
 │       ├── big_float.cr           # BigFloat (~945 lines)
 │       ├── big_rational.cr        # BigRational (~470 lines)
 │       └── ext.cr                 # stdlib type extensions
 ├── spec/
 │   ├── spec_helper.cr
-│   ├── big_number_spec.cr         # BigInt tests (327+ tests)
-│   ├── big_float_spec.cr          # BigFloat tests
-│   └── big_rational_spec.cr       # BigRational tests
+│   ├── big_number_spec.cr         # BigInt tests (136 examples)
+│   ├── big_float_spec.cr          # BigFloat tests (108 examples)
+│   └── big_rational_spec.cr       # BigRational tests (83 examples)
 └── bench/
     └── sanity.cr                  # continuous benchmark vs stdlib
 ```
@@ -292,8 +253,8 @@ algorithms are ~600 lines and could be their own file. Let the code decide.
 **Every operation is fuzz-tested against Crystal's stdlib BigInt (libgmp).**
 
 libgmp is correct. If we disagree with it, we're wrong. This gives us a
-perfect oracle for free. Current suite: 327+ BigInt tests, 120+ BigFloat
-tests, 50+ BigRational tests, with 1000+ random pairs per operation.
+perfect oracle for free. Current suite: 136 BigInt tests, 108 BigFloat
+tests, 83 BigRational tests, with 1000+ random pairs per operation.
 
 Additional targeted tests:
 - Edge cases: zero, one, negative one, `LIMB_MAX`, powers of two
@@ -313,6 +274,7 @@ Additional targeted tests:
 6. `BigNumber::BigRational` works for exact rational arithmetic
 7. `BigNumber::BigFloat` works for arbitrary-precision floating point
 
-We're at (1), (2), (4 for add/mul), (5), (6), and (7). The remaining gap
-is (3): we're 3-6x slower on mul/div/to_s at 100+ limbs. Step 3a-3g
-closes that gap. Then Step 4 makes it a real stdlib replacement.
+We have (1), (2), (4) for add/mul, (5), (6), and (7). The remaining gap is
+(3): mul is 2.5-5.5x slower above 30 limbs, div is ~3x slower, and to_s is
+~5.5x slower. Items 3f-3h target closing those gaps. Add and BigRational are
+essentially at parity.
