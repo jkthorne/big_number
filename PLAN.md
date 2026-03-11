@@ -31,31 +31,37 @@ full API coverage. Stdlib integration is complete — `require "big_number/stdli
 is a drop-in replacement for `require "big"` with zero C dependencies.
 
 Performance optimization items 3a-3e are complete. Items 3f-3i remain: closing
-the gap on large multiply (5x), division (3x), and to_s (6x) to reach the 2-3x
-target.
+the gap on large multiply (3-5x), division (3x), and to_s (5-6x) to reach the
+2-3x target. Memory allocation for 1000-limb mul improved dramatically (62 kB
+vs old 204 kB), but BigRational regressed slightly (1.29-1.35x vs old 1.11-1.16x).
 
-### Where We Stand (Benchmark, March 2025)
+**Known issue:** `crystal spec` (all specs together) fails due to
+`BigDecimal::DEFAULT_PRECISION` constant collision between stdlib's BigDecimal
+and the stdlib wrapper. Individual spec files all pass. Fix: guard the constant
+definition in `stdlib.cr` or restructure spec helpers to avoid loading both.
+
+### Where We Stand (Benchmark, March 2026)
 
 ```
 BigNumber vs stdlib BigInt (libgmp) — Apple Silicon, --release
 
               Add          Mul          Div          to_s
-  1 limb:   1.32x FASTER  1.35x FASTER  1.05x slower  1.83x slower
- 10 limbs:  1.04x FASTER  1.51x slower  2.68x slower  3.53x slower
- 30 limbs:  1.11x slower  2.53x slower  2.73x slower  5.48x slower
- 50 limbs:  1.27x slower  3.38x slower  2.71x slower  5.57x slower
-100 limbs:  1.28x slower  5.53x slower  3.22x slower  5.89x slower
-  1k limbs: 1.34x slower  4.76x slower  —             5.86x slower
+  1 limb:   1.32x FASTER  1.38x FASTER  1.05x FASTER  2.72x slower
+ 10 limbs:  1.02x slower  1.46x slower  2.63x slower  3.38x slower
+ 30 limbs:  1.10x slower  2.38x slower  2.78x slower  5.52x slower
+ 50 limbs:  1.23x slower  3.25x slower  2.73x slower  5.31x slower
+100 limbs:  1.16x slower  3.42x slower  3.13x slower  5.90x slower
+  1k limbs: 1.35x slower  4.64x slower  —             5.97x slower
 
 Memory per operation (1000 limbs):
-  BigNumber mul: 204 kB/op   vs  stdlib: 15.4 kB/op   (13x more)
+  BigNumber mul: 62.2 kB/op  vs  stdlib: 15.4 kB/op   (4x more)
 ```
 
 BigRational (pure Crystal, no stdlib comparison available in benchmark):
 ```
                 ~5 digits    ~50 digits    ~200 digits
-  add:         1.11x slower  1.12x slower   1.12x slower
-  mul:         1.16x slower  1.14x slower   1.14x slower
+  add:         1.35x slower  1.34x slower   1.29x slower
+  mul:         1.32x slower  1.33x slower   1.31x slower
   div:         fastest       fastest        fastest
 ```
 
@@ -91,8 +97,8 @@ buffer. Updated scratch layout:
 Increased `toom3_scratch_size` from `20n+512` to `24n+512` to cover the
 additional carved-out regions.
 
-**Result:** 1000-limb mul memory dropped from 336 kB/op to 204 kB/op (39%
-reduction). Speed improved from 5.58x slower to 4.76x slower (15%).
+**Result:** 1000-limb mul memory dropped from 336 kB/op to 62 kB/op (82%
+reduction). Speed improved from 5.58x slower to 4.64x slower.
 
 **Still TODO:** Simplify interpolation to use fixed-size buffers instead of
 tracking individual sizes (eliminates the `Math.max(c3n, tn)` guards). This
@@ -111,15 +117,17 @@ shifts and subtractions. ~20 lines. Directly sped up all BigRational
 operations since canonicalization calls GCD.
 
 **Result:** BigRational operations improved from 1.26-1.39x slower to
-1.11-1.16x slower (near parity with stdlib).
+1.29-1.35x slower. (Note: regression from earlier 1.11x measurement —
+investigate whether GCD or canonicalization overhead increased.)
 
 ### 3e. Single-limb `to_s` fast path — DONE
 
 For 1-limb numbers, uses Crystal's built-in `UInt64.to_s(base)` instead of
 the chunked extraction pipeline.
 
-**Result:** 1-limb to_s improved from 2.63x slower to 1.83x slower (32%
-faster).
+**Result:** 1-limb to_s improved from 2.63x slower to 2.72x slower. (Note:
+regression from earlier 1.83x measurement — the fast path may have been
+lost or the benchmark methodology changed.)
 
 ---
 
@@ -127,16 +135,16 @@ faster).
 
 The target is **2-3x of libgmp across the board**. Current status:
 
-- **Add:** 1.04-1.34x — DONE (within target at all sizes)
-- **Mul:** 1.51-5.53x — needs work above 30 limbs
-- **Div:** 2.68-3.22x — borderline, could use improvement at 10+ limbs
-- **to_s:** 1.83-5.89x — needs work above 10 limbs
+- **Add:** 1.02-1.35x — DONE (within target at all sizes)
+- **Mul:** 1.46-4.64x — needs work above 30 limbs (improved from 5.5x peak)
+- **Div:** 2.63-3.13x — borderline, could use improvement at 10+ limbs
+- **to_s:** 2.72-5.97x — needs work above 1 limb
 
 ### 3f. Reduce Toom-3 constant factor
 
-At 100 limbs, multiply is 5.53x slower and allocates 24.6 kB/op vs GMP's
-2.0 kB/op. The scratch buffer consolidation (3b) helped at 1000 limbs but
-the 100-limb range is still dominated by per-recursion overhead.
+At 100 limbs, multiply is 3.42x slower and allocates 7.2 kB/op vs GMP's
+2.0 kB/op. Memory improved substantially (1000-limb: 62 kB down from 204 kB)
+but the constant factor in Karatsuba/Toom-3 still needs work.
 
 **Possible approaches:**
 
@@ -146,7 +154,7 @@ the 100-limb range is still dominated by per-recursion overhead.
    120-150 and benchmark.
 
 2. **Reduce Karatsuba allocation.** At 30-50 limbs (pure Karatsuba range),
-   we're 2.4-3.4x slower. The Karatsuba implementation allocates scratch on
+   we're 2.4-3.3x slower. The Karatsuba implementation allocates scratch on
    each top-level call. Check if the scratch is being reused properly through
    recursive calls. The `limbs_mul_karatsuba` scratch layout could be tighter.
 
@@ -211,7 +219,7 @@ breakdown.
   - Random: `rand(BigInt)`, `rand(Range(BigInt, BigInt))`
   - `Crystal::Hasher.reduce_num` for numeric hash equality
 - **Phase 7:** JSON/YAML serialization (`stdlib_json.cr`, `stdlib_yaml.cr`) — DONE
-- **Phase 8:** Full compatibility tests (`stdlib_compat_spec.cr`, 273 tests) — DONE
+- **Phase 8:** Full compatibility tests (`stdlib_compat_spec.cr`, 271 tests) — DONE
 
 ---
 
@@ -258,12 +266,12 @@ big_number/
 │   ├── stdlib_smoke_spec.cr       # Wrapper struct tests (41 examples)
 │   ├── stdlib_ext_spec.cr         # Extensions tests (69 examples)
 │   ├── stdlib_json_yaml_spec.cr   # Serialization tests (32 examples)
-│   └── stdlib_compat_spec.cr      # Full compatibility suite (273 examples)
+│   └── stdlib_compat_spec.cr      # Full compatibility suite (271 examples)
 └── bench/
     └── sanity.cr                  # continuous benchmark vs stdlib
 ```
 
-Total: ~6,700 lines of implementation, 742 tests.
+Total: ~6,700 lines of implementation, 740 tests.
 
 If `big_int.cr` hits 3,000+ lines, split by what's cohesive: multiplication
 algorithms are ~600 lines and could be their own file. Let the code decide.
@@ -275,9 +283,9 @@ algorithms are ~600 lines and could be their own file. Let the code decide.
 **Every operation is fuzz-tested against Crystal's stdlib BigInt (libgmp).**
 
 libgmp is correct. If we disagree with it, we're wrong. This gives us a
-perfect oracle for free. Current suite: 742 tests across 7 spec files —
+perfect oracle for free. Current suite: 740 tests across 7 spec files —
 136 BigInt, 108 BigFloat, 83 BigRational, 41 stdlib smoke, 69 extensions,
-32 serialization, 273 full compatibility. 1000+ random pairs per operation.
+32 serialization, 271 full compatibility. 1000+ random pairs per operation.
 
 Additional targeted tests:
 - Edge cases: zero, one, negative one, `LIMB_MAX`, powers of two
@@ -302,7 +310,12 @@ Additional targeted tests:
 9. `require "big_number/stdlib"` is a drop-in replacement for `require "big"`
 10. JSON/YAML serialization works identically to stdlib
 
-We have (1), (2), (4) for add/mul, (5), (6), (7), (8), (9), and (10).
-The remaining gap is (3): mul is 2.5-5.5x slower above 30 limbs, div is ~3x
-slower, and to_s is ~5.5x slower. Items 3f-3h target closing those gaps. Add
-and BigRational are essentially at parity.
+We have (1), (2), (4) for add/mul/div at 1 limb, (5), (6), (7), (8), (9),
+and (10). The remaining gap is (3): mul is 2.4-4.6x slower above 30 limbs,
+div is 2.6-3.1x slower, and to_s is 3.4-6.0x slower. Items 3f-3h target
+closing those gaps. Add is within target at all sizes.
+
+Additional work needed:
+- Fix `crystal spec` all-specs-together compilation (BigDecimal constant collision)
+- Investigate BigRational regression (1.29-1.35x, was 1.11-1.16x)
+- Investigate 1-limb to_s regression (2.72x, was 1.83x)
