@@ -275,14 +275,17 @@ algorithms are ~600 lines and could be their own file. Let the code decide.
 **Every operation is fuzz-tested against Crystal's stdlib BigInt (libgmp).**
 
 libgmp is correct. If we disagree with it, we're wrong. This gives us a
-perfect oracle for free. Current suite: 136 BigInt tests, 108 BigFloat
-tests, 83 BigRational tests, with 1000+ random pairs per operation.
+perfect oracle for free. Current suite: 742 tests across 7 spec files —
+136 BigInt, 108 BigFloat, 83 BigRational, 41 stdlib smoke, 69 extensions,
+32 serialization, 273 full compatibility. 1000+ random pairs per operation.
 
 Additional targeted tests:
 - Edge cases: zero, one, negative one, `LIMB_MAX`, powers of two
 - Boundary conditions: operands at exact algorithm thresholds (32, 90 limbs)
 - Division: divisor larger than dividend, single-limb divisor, exact division
 - String round-trip: `BigInt.new(x.to_s) == x` for all bases 2-36
+- Stdlib compatibility: type hierarchy (`is_a?`), cross-type arithmetic, hash equality
+- Serialization: JSON/YAML round-trips, object key support
 
 ---
 
