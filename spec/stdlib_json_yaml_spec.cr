@@ -1,4 +1,6 @@
 require "spec"
+
+{% if flag?(:big_number_stdlib) %}
 require "../src/big_number/stdlib_json"
 require "../src/big_number/stdlib_yaml"
 
@@ -174,3 +176,4 @@ describe "Phase 7: YAML serialization" do
     end
   end
 end
+{% end %}

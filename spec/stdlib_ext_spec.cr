@@ -1,4 +1,6 @@
 require "spec"
+
+{% if flag?(:big_number_stdlib) %}
 require "../src/big_number/stdlib"
 
 describe "Phase 6: stdlib_ext" do
@@ -374,3 +376,4 @@ describe "Phase 6: stdlib_ext" do
     end
   end
 end
+{% end %}

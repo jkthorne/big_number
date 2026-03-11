@@ -1,4 +1,6 @@
 require "spec"
+
+{% if flag?(:big_number_stdlib) %}
 require "../src/big_number/stdlib"
 
 describe "BigInt (stdlib wrapper)" do
@@ -215,3 +217,4 @@ describe "Cross-type operations" do
     r.denominator.should eq(BigInt.new(3))
   end
 end
+{% end %}

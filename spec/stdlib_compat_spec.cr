@@ -1,4 +1,6 @@
 require "spec"
+
+{% if flag?(:big_number_stdlib) %}
 require "json"
 require "yaml"
 require "../src/big_number/stdlib"
@@ -1513,3 +1515,4 @@ describe "Phase 8: Stdlib Compatibility" do
     end
   end
 end
+{% end %}
