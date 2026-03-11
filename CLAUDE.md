@@ -67,10 +67,11 @@ Complete drop-in stdlib replacement via `require "big_number/stdlib"`:
 
 ### Testing Strategy
 
-Tests fuzz-compare every operation against Crystal's stdlib BigInt (libgmp) as an oracle. If we disagree with libgmp, we're wrong.
+Tests fuzz-compare every operation against Crystal's stdlib BigInt (libgmp) as an oracle. If we disagree with libgmp, we're wrong. Full compatibility suite (271 tests) validates stdlib drop-in behavior.
 
 ## Notes
 
-- Requires Crystal >= 1.19.1
+- Version 0.1.0, Crystal >= 1.19.1
 - No external dependencies
+- Uses Boehm GC — `Pointer.malloc` (GC_MALLOC_ATOMIC) does NOT zero memory
 - See `PLAN.md` for roadmap and `STDLIB_REPLACEMENT_PLAN.md` for stdlib integration plans
