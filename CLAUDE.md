@@ -43,8 +43,17 @@ bench/sanity_bin 2>&1                     # Run precompiled benchmark
 
 ### Source Layout
 
-- `src/big_number.cr` — Main require file + stdlib extensions
-- `src/big_number/` — Implementation modules
+- `src/big_number.cr` — Main require file + VERSION constant
+- `src/big_number/limb.cr` — Type aliases (`Limb = UInt64`, `SignedLimb = Int64`)
+- `src/big_number/big_int.cr` — Core BigInt (~2550 lines)
+- `src/big_number/big_rational.cr` — Rational arithmetic
+- `src/big_number/big_float.cr` — Floating point
+- `src/big_number/big_decimal.cr` — Decimal arithmetic
+- `src/big_number/ext.cr` — Legacy stdlib type extensions
+- `src/big_number/stdlib.cr` — Wrapper structs for stdlib replacement (`BigInt < Int`, etc.)
+- `src/big_number/stdlib_ext.cr` — Primitive extensions, Math module, Random, Hasher
+- `src/big_number/stdlib_json.cr` — JSON serialization
+- `src/big_number/stdlib_yaml.cr` — YAML deserialization
 
 ### Testing Strategy
 
