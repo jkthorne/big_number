@@ -204,8 +204,43 @@ module BigNumber
     end
 
     def <=>(other : Int) : Int32
-      temp = BigInt.new(other)
-      self <=> temp
+      # Fast path: avoid allocation for single/zero-limb comparisons
+      other_neg = other < 0
+      if negative? && !other_neg
+        return -1
+      elsif !negative? && other_neg
+        return zero? && other == 0 ? 0 : (negative? ? -1 : 1)
+      end
+      # Same sign
+      if other == 0
+        return zero? ? 0 : (negative? ? -1 : 1)
+      end
+      mag = other_neg ? (0_u128 &- other.to_u128!) : other.to_u128
+      lo = mag.to_u64!
+      hi = (mag >> 64).to_u64!
+      other_size = hi != 0 ? 2 : 1
+      n = abs_size
+      if n != other_size
+        cmp = n > other_size ? 1 : -1
+        return negative? ? -cmp : cmp
+      end
+      # Same number of limbs — compare from top
+      if other_size == 2
+        cmp = if @limbs[1] != hi
+                @limbs[1] > hi ? 1 : -1
+              elsif @limbs[0] != lo
+                @limbs[0] > lo ? 1 : -1
+              else
+                0
+              end
+      else
+        cmp = if @limbs[0] != lo
+                @limbs[0] > lo ? 1 : -1
+              else
+                0
+              end
+      end
+      negative? ? -cmp : cmp
     end
 
     def <=>(other : Float::Primitive) : Int32?
@@ -240,7 +275,22 @@ module BigNumber
     end
 
     def ==(other : Int) : Bool
-      (self <=> BigInt.new(other)) == 0
+      # Fast path: avoid allocation for small comparisons
+      if other == 0
+        return zero?
+      end
+      neg = other < 0
+      return false if neg != negative?
+      mag = neg ? (0_u128 &- other.to_u128!) : other.to_u128
+      lo = mag.to_u64!
+      hi = (mag >> 64).to_u64!
+      if hi != 0
+        return false if abs_size != 2
+        @limbs[0] == lo && @limbs[1] == hi
+      else
+        return false if abs_size != 1
+        @limbs[0] == lo
+      end
     end
 
     def hash(hasher)
