@@ -241,18 +241,29 @@ big_number/
 │   ├── big_number.cr              # require + version
 │   └── big_number/
 │       ├── limb.cr                # type aliases
-│       ├── big_int.cr             # BigInt (~2500 lines)
-│       ├── big_float.cr           # BigFloat (~945 lines)
-│       ├── big_rational.cr        # BigRational (~470 lines)
-│       └── ext.cr                 # stdlib type extensions
+│       ├── big_int.cr             # BigInt (~2550 lines)
+│       ├── big_float.cr           # BigFloat (~750 lines)
+│       ├── big_rational.cr        # BigRational (~360 lines)
+│       ├── big_decimal.cr         # BigDecimal (~375 lines, ported from stdlib)
+│       ├── ext.cr                 # legacy stdlib type extensions
+│       ├── stdlib.cr              # wrapper structs for stdlib replacement (~1320 lines)
+│       ├── stdlib_ext.cr          # primitive extensions, Math, Random, Hasher (~460 lines)
+│       ├── stdlib_json.cr         # JSON serialization (~90 lines)
+│       └── stdlib_yaml.cr         # YAML deserialization (~25 lines)
 ├── spec/
 │   ├── spec_helper.cr
 │   ├── big_number_spec.cr         # BigInt tests (136 examples)
 │   ├── big_float_spec.cr          # BigFloat tests (108 examples)
-│   └── big_rational_spec.cr       # BigRational tests (83 examples)
+│   ├── big_rational_spec.cr       # BigRational tests (83 examples)
+│   ├── stdlib_smoke_spec.cr       # Wrapper struct tests (41 examples)
+│   ├── stdlib_ext_spec.cr         # Extensions tests (69 examples)
+│   ├── stdlib_json_yaml_spec.cr   # Serialization tests (32 examples)
+│   └── stdlib_compat_spec.cr      # Full compatibility suite (273 examples)
 └── bench/
     └── sanity.cr                  # continuous benchmark vs stdlib
 ```
+
+Total: ~6,700 lines of implementation, 742 tests.
 
 If `big_int.cr` hits 3,000+ lines, split by what's cohesive: multiplication
 algorithms are ~600 lines and could be their own file. Let the code decide.
