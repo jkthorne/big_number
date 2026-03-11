@@ -1963,10 +1963,12 @@ module BigNumber
     end
 
     protected def self.toom3_scratch_size(n : Int32) : Int32
-      # Toom-3 needs space for 5 evaluation temporaries (~k+1 each where k=ceil(n/3)),
-      # 5 product temporaries (~2k+2 each), plus recursive scratch.
-      # Conservative: ~20n covers evaluation + products + recursion.
-      Math.max(20 * n + 512, 2048)
+      # Toom-3 scratch layout (k = ceil(n/3), pn = 2*(k+1)):
+      #   [w0 | w1 | wm1 | w2 | winf | ea | eb | interp_c2 | interp_t | interp_tmp8 | eval_tmp | recursive_scratch]
+      #   5*pn + 2*(k+2) + 3*maxn + (k+2) + recursive
+      # where maxn = 2*k+4.
+      # Conservative: ~24n covers all buffers plus recursion.
+      Math.max(24 * n + 512, 2048)
     end
 
     # Toom-Cook 3-way multiply: O(n^1.465).
@@ -2013,8 +2015,9 @@ module BigNumber
       while b2n > 0 && b2[b2n - 1] == 0; b2n -= 1; end
 
       # We need 5 product buffers in scratch, each up to 2*(k+1) limbs.
-      # Layout: [w0 | w1 | wm1 | w2 | winf | eval_a | eval_b | recursive_scratch]
+      # Layout: [w0 | w1 | wm1 | w2 | winf | ea | eb | interp_c2 | interp_t | interp_tmp8 | eval_tmp | recursive_scratch]
       pn = 2 * (k + 1)  # max product size
+      maxn = 2 * k + 4   # max coefficient size for interpolation
       w0   = scratch
       w1   = scratch + pn
       wm1  = scratch + 2 * pn
@@ -2022,9 +2025,13 @@ module BigNumber
       winf = scratch + 4 * pn
 
       # Evaluation temporaries
-      ea = scratch + 5 * pn        # k+2 limbs for evaluating a
-      eb = scratch + 5 * pn + k + 2  # k+2 limbs for evaluating b
-      rec_scratch = scratch + 5 * pn + 2 * (k + 2)
+      ea = scratch + 5 * pn                    # k+2 limbs for evaluating a
+      eb = scratch + 5 * pn + (k + 2)         # k+2 limbs for evaluating b
+      # Interpolation temporaries (carved from scratch, not heap-allocated)
+      interp_c2  = scratch + 5 * pn + 2 * (k + 2)
+      interp_t   = interp_c2 + maxn
+      interp_tmp = interp_t + maxn             # used for 8*winf and eval_at2 temp
+      rec_scratch = interp_tmp + maxn
 
       # --- Evaluate at point 0: a(0) = a0, b(0) = b0 ---
       # W(0) = a0 * b0
@@ -2066,8 +2073,8 @@ module BigNumber
       wm1_neg = ea_neg ^ eb_neg  # product is negative if exactly one eval was negative
 
       # --- Evaluate at point 2: a(2) = a0+2*a1+4*a2, b(2) = b0+2*b1+4*b2 ---
-      ean = toom3_eval_at2(ea, a0, a0n, a1, a1n, a2, a2n)
-      ebn = toom3_eval_at2(eb, b0, b0n, b1, b1n, b2, b2n)
+      ean = toom3_eval_at2(ea, a0, a0n, a1, a1n, a2, a2n, interp_tmp)
+      ebn = toom3_eval_at2(eb, b0, b0n, b1, b1n, b2, b2n, interp_tmp)
       toom3_mul_recurse(w2, ea, ean, eb, ebn, rec_scratch)
       w2n = ean + ebn
       while w2n > 0 && w2[w2n - 1] == 0; w2n -= 1; end
@@ -2120,7 +2127,7 @@ module BigNumber
       #
       # I'll implement it step by step from the standard Toom-3 interpolation.
 
-      toom3_interpolate(rp, an + bn, k, w0, w0n, w1, w1n, wm1, wm1n, wm1_neg, w2, w2n, winf, winfn)
+      toom3_interpolate(rp, an + bn, k, w0, w0n, w1, w1n, wm1, wm1n, wm1_neg, w2, w2n, winf, winfn, interp_c2, interp_t, interp_tmp)
     end
 
     # Evaluate p(1) = a0 + a1 + a2. Returns actual size of result in ea.
@@ -2191,7 +2198,7 @@ module BigNumber
 
     # Evaluate p(2) = a0 + 2*a1 + 4*a2. Returns actual size.
     # Uses a small temp buffer to compute 2*a1 and 4*a2 cleanly.
-    protected def self.toom3_eval_at2(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32) : Int32
+    protected def self.toom3_eval_at2(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32, tmp : Pointer(Limb)) : Int32
       # Start with a0
       if a0n > 0
         a0n.times { |i| ea[i] = a0[i] }
@@ -2201,9 +2208,8 @@ module BigNumber
         ean = 1
       end
 
-      # Add 2*a1 using a temp buffer
+      # Add 2*a1 using provided temp buffer
       if a1n > 0
-        tmp = Pointer(Limb).malloc(a1n + 1)
         top = limbs_lshift(tmp, a1, a1n, 1)
         tmpn = a1n
         if top != 0; tmp[tmpn] = top; tmpn += 1; end
@@ -2218,7 +2224,6 @@ module BigNumber
 
       # Add 4*a2
       if a2n > 0
-        tmp = Pointer(Limb).malloc(a2n + 1)
         top = limbs_lshift(tmp, a2, a2n, 2)
         tmpn = a2n
         if top != 0; tmp[tmpn] = top; tmpn += 1; end
@@ -2270,12 +2275,10 @@ module BigNumber
                                           w1 : Pointer(Limb), w1n : Int32,
                                           wm1 : Pointer(Limb), wm1n : Int32, wm1_neg : Bool,
                                           w2 : Pointer(Limb), w2n : Int32,
-                                          winf : Pointer(Limb), winfn : Int32)
-      # Allocate temp buffers to avoid aliasing issues.
-      # Each coefficient is at most 2*(k+1) limbs.
+                                          winf : Pointer(Limb), winfn : Int32,
+                                          c2 : Pointer(Limb), t : Pointer(Limb), tmp8 : Pointer(Limb))
+      # c2, t, tmp8 are pre-allocated from scratch (each at least 2*k+4 limbs).
       maxn = 2 * k + 4
-      c2 = Pointer(Limb).malloc(maxn)
-      t  = Pointer(Limb).malloc(maxn)
 
       # --- c2 = (w1 + wm1) / 2 - w0 - winf ---
       # w1 + signed_wm1: if wm1_neg, w1 + (-|wm1|) = w1 - |wm1|; else w1 + |wm1|
@@ -2352,7 +2355,6 @@ module BigNumber
       end
       # c3 -= 8*winf
       if winfn > 0
-        tmp8 = Pointer(Limb).malloc(winfn + 1)
         top = limbs_lshift(tmp8, winf, winfn, 3)
         tmp8n = winfn
         if top != 0; tmp8[tmp8n] = top; tmp8n += 1; end
