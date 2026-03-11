@@ -25,10 +25,14 @@ source code.
 
 ## Current Status
 
-Steps 1-2 are done. BigInt, BigRational, and BigFloat all exist, are correct
-(fuzz-tested against libgmp), and have full API coverage. Step 3 is in progress:
-Karatsuba and Toom-3 are implemented, D&C base conversion exists, and the first
-round of optimization (3a-3e) is complete.
+Steps 1-3 (partial) and Step 4 are done. All four types (BigInt, BigRational,
+BigFloat, BigDecimal) exist, are correct (fuzz-tested against libgmp), and have
+full API coverage. Stdlib integration is complete — `require "big_number/stdlib"`
+is a drop-in replacement for `require "big"` with zero C dependencies.
+
+Performance optimization items 3a-3e are complete. Items 3f-3i remain: closing
+the gap on large multiply (5x), division (3x), and to_s (6x) to reach the 2-3x
+target.
 
 ### Where We Stand (Benchmark, March 2025)
 
