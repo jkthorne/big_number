@@ -1,4 +1,31 @@
 module BigNumber
+  # Convert a finite float's truncated integer part to a BigInt.
+  # Uses binary decomposition to avoid precision loss from string conversion.
+  protected def self.float_to_bigint(f : Float64) : BigInt
+    return BigInt.new(0) if f == 0.0
+    neg = f < 0
+    f = -f if neg
+    # Decompose f = mantissa * 2^exponent
+    # IEEE 754: 52-bit mantissa, 11-bit exponent
+    bits = f.unsafe_as(UInt64)
+    raw_exp = ((bits >> 52) & 0x7FF).to_i32
+    mantissa = bits & ((1_u64 << 52) - 1)
+    if raw_exp == 0
+      # Denormalized
+      exp = -1074
+    else
+      mantissa |= (1_u64 << 52) # implicit leading 1
+      exp = raw_exp - 1023 - 52
+    end
+    result = BigInt.new(mantissa)
+    if exp > 0
+      result = result << exp
+    elsif exp < 0
+      result = result >> (-exp)
+    end
+    neg ? -result : result
+  end
+
   struct BigInt
     include Comparable(BigInt)
     include Comparable(Int)
@@ -109,6 +136,20 @@ module BigNumber
       @size = -@size if neg && @size != 0
     end
 
+    def self.from_digits(digits : Enumerable(Int), base : Int = 10) : self
+      raise ArgumentError.new("Invalid base #{base}") if base < 2
+      result = BigInt.new(0)
+      multiplier = BigInt.new(1)
+      b = BigInt.new(base)
+      digits.each do |digit|
+        raise ArgumentError.new("Invalid digit #{digit}") if digit < 0
+        raise ArgumentError.new("Invalid digit #{digit} for base #{base}") if digit >= base
+        result = result + multiplier * BigInt.new(digit)
+        multiplier = multiplier * b
+      end
+      result
+    end
+
     # --- Accessors ---
 
     @[AlwaysInline]
@@ -141,6 +182,11 @@ module BigNumber
       !zero? && (@limbs[0] & 1_u64) == 1
     end
 
+    @[AlwaysInline]
+    def sign : Int32
+      @size < 0 ? -1 : (@size > 0 ? 1 : 0)
+    end
+
     # --- Comparison ---
 
     def <=>(other : BigInt) : Int32
@@ -160,6 +206,28 @@ module BigNumber
     def <=>(other : Int) : Int32
       temp = BigInt.new(other)
       self <=> temp
+    end
+
+    def <=>(other : Float::Primitive) : Int32?
+      return nil if other.nan?
+      if other.infinite?
+        return other > 0 ? -1 : 1
+      end
+      f = other.to_f64
+      # Check if float has a fractional part
+      trunc = LibM.trunc_f64(f)
+      has_frac = f != trunc
+      # Build BigInt from the integer part of the float via binary decomposition
+      other_int = BigNumber.float_to_bigint(f)
+      cmp = self <=> other_int
+      if cmp != 0
+        cmp < 0 ? -1 : 1
+      elsif has_frac
+        # self == integer part of other, but other has fractional part
+        f > 0 ? -1 : 1
+      else
+        0
+      end
     end
 
     def ==(other : BigInt) : Bool
@@ -1002,7 +1070,6 @@ module BigNumber
       top = limbs[size - 1]
       bit_len = (size - 1) * 64 + (64 - top.leading_zeros_count.to_i32)
       est_digits = (bit_len.to_f64 * Math.log(2.0) / Math.log(base.to_f64)).to_i32 + 2
-      STDERR.puts "DC_TO_S: size=#{size}, bit_len=#{bit_len}, est_digits=#{est_digits}"
 
       # Precompute base powers: powers[i] = base^(chunk * 2^i) where chunk = chunk_params digits
       powers = precompute_base_powers(base, est_digits)
@@ -1011,8 +1078,6 @@ module BigNumber
       buf = Pointer(UInt8).malloc(est_digits)
       buf_len = est_digits
       est_digits.times { |i| buf[i] = 0_u8 }
-      @@dc_debug_base = buf
-      @@dc_debug_target = 4258
 
       # Copy limbs into a working BigInt
       num = BigInt.new(capacity: size)
@@ -1022,27 +1087,17 @@ module BigNumber
       # Recursively fill buffer
       dc_to_s_recurse(buf, buf_len, num, base, powers, powers.size - 1)
 
-      STDERR.puts "After recursion: buf[4256]=#{buf[4256]}, buf[4258]=#{buf[4258]}" if buf_len > 4258
-
       # Skip leading zeros (but respect precision)
       start = 0
       while start < buf_len - 1 && buf[start] == 0 && (buf_len - start) > precision
         start += 1
       end
-      STDERR.puts "start=#{start}, output[4256] from buf[#{start + 4256}]=#{buf[start + 4256]}" if buf_len > start + 4256
 
-      # Use buf[0] to access through the base pointer, preventing LLVM from
-      # optimizing away buf and leaving only interior pointers that GC can't trace.
       i = start
       while i < buf_len
         c = digit_to_char((buf + i).value)
         io << (upcase ? c.upcase : c)
         i += 1
-      end
-      # Ensure buf base pointer stays live through the loop to prevent GC collection.
-      # Access buf[0] after the loop to prevent LLVM from optimizing away the reference.
-      if buf_len > 0
-        _ = buf[0]
       end
     end
 
@@ -1065,28 +1120,10 @@ module BigNumber
 
     # Recursively convert num into buf[0..buf_len-1].
     # level is the current power table index to split at.
-    @@dc_debug_base : Pointer(UInt8) = Pointer(UInt8).null
-    @@dc_debug_target : Int32 = -1
-
     protected def self.dc_to_s_recurse(buf : Pointer(UInt8), buf_len : Int32, num : BigInt, base : Int32, powers : Array(BigInt), level : Int32)
-      abs_off = @@dc_debug_base.null? ? 0 : (buf - @@dc_debug_base).to_i32
-      covers_target = !@@dc_debug_base.null? && abs_off <= @@dc_debug_target && abs_off + buf_len > @@dc_debug_target
-
       # Base case: small enough for batch digit extraction
       if level < 0 || num.abs_size < DC_TO_S_THRESHOLD
         n = num.abs_size
-        if covers_target
-          STDERR.puts "BASE CASE: abs_off=#{abs_off}, buf_len=#{buf_len}, level=#{level}, num.abs_size=#{n}, target_local=#{@@dc_debug_target - abs_off}"
-          if n > 0
-            # Verify num's value against stdlib
-            num_str_io = String::Builder.new
-            simple_to_s(num_str_io, num.@limbs, n, base, 1, false)
-            num_str = num_str_io.to_s
-            # Compare with what the correct global value should be
-            STDERR.puts "  BASE num value: #{num_str}"
-            STDERR.puts "  BASE num limbs[0..3]: #{(0...Math.min(4,n)).map{|i| num.@limbs[i]}.join(", ")}"
-          end
-        end
         return if n == 0 # buf already zero-filled
 
         chunk_size, chunk_base = chunk_params(base)
@@ -1105,9 +1142,6 @@ module BigNumber
             # Not the last chunk: emit exactly chunk_size digits
             chunk_size.times do
               break if pos < 0
-              if covers_target && (abs_off + pos) == @@dc_debug_target
-                STDERR.puts "  WRITING target: digit=#{rem % base.to_u64}, pos=#{pos}, abs=#{abs_off + pos}, rem=#{rem}"
-              end
               buf[pos] = (rem % base.to_u64).to_u8
               rem = rem // base.to_u64
               pos -= 1
@@ -1115,17 +1149,11 @@ module BigNumber
           else
             # Last chunk: only significant digits
             while rem > 0 && pos >= 0
-              if covers_target && (abs_off + pos) == @@dc_debug_target
-                STDERR.puts "  WRITING target (last): digit=#{rem % base.to_u64}, pos=#{pos}, abs=#{abs_off + pos}, rem=#{rem}"
-              end
               buf[pos] = (rem % base.to_u64).to_u8
               rem = rem // base.to_u64
               pos -= 1
             end
           end
-        end
-        if covers_target
-          STDERR.puts "  After base case: buf[target]=#{buf[@@dc_debug_target - abs_off]}"
         end
         return
       end
@@ -1140,28 +1168,6 @@ module BigNumber
       # Split: num = hi * divisor + lo
       hi, lo = num.tdiv_rem(divisor)
 
-      # DEBUG: verify division against stdlib for splits covering target
-      if covers_target && num.abs_size < 200
-        num_str_io = String::Builder.new
-        simple_to_s(num_str_io, num.@limbs, num.abs_size, base, 1, false)
-        num_gmp = ::BigInt.new(num_str_io.to_s)
-        div_str_io = String::Builder.new
-        simple_to_s(div_str_io, divisor.@limbs, divisor.abs_size, base, 1, false)
-        div_gmp = ::BigInt.new(div_str_io.to_s)
-        hi_gmp = num_gmp // div_gmp
-        lo_gmp = num_gmp % div_gmp
-        hi_str_io = String::Builder.new
-        simple_to_s(hi_str_io, hi.@limbs, hi.abs_size, base, 1, false)
-        lo_str_io = String::Builder.new
-        simple_to_s(lo_str_io, lo.@limbs, lo.abs_size, base, 1, false)
-        if hi_str_io.to_s != hi_gmp.to_s
-          STDERR.puts "  DIV BUG (hi) at level=#{level}"
-        end
-        if lo_str_io.to_s != lo_gmp.to_s
-          STDERR.puts "  DIV BUG (lo) at level=#{level}"
-        end
-      end
-
       # The divisor covers chunk_size * 2^level digits → that's the size of the lower half
       chunk_size, _ = chunk_params(base)
       lo_digits = chunk_size * (1 << level)
@@ -1170,24 +1176,9 @@ module BigNumber
       end
       hi_digits = buf_len - lo_digits
 
-      if covers_target
-        STDERR.puts "SPLIT level=#{level}: abs_off=#{abs_off}, buf_len=#{buf_len}, hi_digits=#{hi_digits}, lo_digits=#{lo_digits}, hi.size=#{hi.abs_size}, lo.size=#{lo.abs_size}"
-        target_local = @@dc_debug_target - abs_off
-        STDERR.puts "  target_local=#{target_local}, in #{target_local < hi_digits ? "HI" : "LO"}"
-        STDERR.puts "  buf[target] before recurse: #{buf[target_local]}"
-      end
-
       # Recurse on each half
       dc_to_s_recurse(buf, hi_digits, hi, base, powers, level - 1)
-      if covers_target
-        target_local = @@dc_debug_target - abs_off
-        STDERR.puts "  buf[target] after HI recurse: #{buf[target_local]}"
-      end
       dc_to_s_recurse(buf + hi_digits, lo_digits, lo, base, powers, level - 1)
-      if covers_target
-        target_local = @@dc_debug_target - abs_off
-        STDERR.puts "  buf[target] after LO recurse: #{buf[target_local]}"
-      end
     end
 
     def inspect(io : IO) : Nil
@@ -1223,8 +1214,12 @@ module BigNumber
 
       def to_{{info[1].id}}! : {{info[0]}}
         return {{info[0]}}.new(0) if zero?
-        val = @limbs[0].to_{{info[1].id}}!
-        negative? ? (0.to_{{info[1].id}}! &- val) : val
+        {% if info[1] == "i128" %}
+          to_i128_internal.to_i128!
+        {% else %}
+          val = @limbs[0].to_{{info[1].id}}!
+          negative? ? (0.to_{{info[1].id}}! &- val) : val
+        {% end %}
       end
     {% end %}
 
@@ -1240,8 +1235,12 @@ module BigNumber
 
       def to_{{info[1].id}}! : {{info[0]}}
         return {{info[0]}}.new(0) if zero?
-        val = @limbs[0].to_{{info[1].id}}!
-        negative? ? (0.to_{{info[1].id}}! &- val) : val
+        {% if info[1] == "u128" %}
+          to_u128_internal.to_u128!
+        {% else %}
+          val = @limbs[0].to_{{info[1].id}}!
+          negative? ? (0.to_{{info[1].id}}! &- val) : val
+        {% end %}
       end
     {% end %}
 
@@ -1281,6 +1280,14 @@ module BigNumber
       self
     end
 
+    def to_big_f(*, precision : Int32 = BigFloat.default_precision) : BigFloat
+      BigFloat.new(self, precision: precision)
+    end
+
+    def to_big_r : BigRational
+      BigRational.new(self)
+    end
+
     def digits(base : Int = 10) : Array(Int32)
       raise ArgumentError.new("Can't request digits of negative number") if negative?
       raise ArgumentError.new("Invalid base #{base}") unless base >= 2
@@ -1300,14 +1307,8 @@ module BigNumber
     # --- Misc ---
 
     def next_power_of_two : BigInt
-      raise ArgumentError.new("Expected non-negative number") if negative?
-      return BigInt.new(1) if zero?
-      # If already a power of 2, return self
-      bl = bit_length
-      if popcount == 1
-        return dup_value
-      end
-      BigInt.new(1) << bl
+      return BigInt.new(1) if @size <= 0
+      popcount == 1 ? dup_value : BigInt.new(1) << bit_length
     end
 
     def factor_by(number : Int) : {BigInt, UInt64}
@@ -1387,7 +1388,7 @@ module BigNumber
       n = abs_size
       val = @limbs[0].to_u128
       val |= @limbs[1].to_u128 << 64 if n >= 2
-      negative? ? -(val.to_i128!) : val.to_i128!
+      negative? ? (0_i128 &- val.to_i128!) : val.to_i128!
     end
 
     private def to_u128_internal : UInt128
@@ -1870,19 +1871,7 @@ module BigNumber
     # Splits each operand into 3 pieces, evaluates at 5 points {0, 1, -1, 2, ∞},
     # does 5 recursive multiplications of ~n/3 size, then interpolates.
     # Requires an >= bn >= TOOM3_THRESHOLD. rp must have space for an+bn limbs.
-    @@toom3_debug = false
-
     protected def self.limbs_mul_toom3(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
-      # DEBUG: save inputs at the very start
-      ap_copy = Pointer(Limb).null
-      bp_copy = Pointer(Limb).null
-      if @@toom3_debug
-        ap_copy = Pointer(Limb).malloc(an)
-        bp_copy = Pointer(Limb).malloc(bn)
-        an.times { |i| ap_copy[i] = ap[i] }
-        bn.times { |i| bp_copy[i] = bp[i] }
-      end
-
       if bn < TOOM3_THRESHOLD
         if bn < KARATSUBA_THRESHOLD
           limbs_mul_schoolbook(rp, ap, an, bp, bn)
@@ -2030,32 +2019,6 @@ module BigNumber
       # I'll implement it step by step from the standard Toom-3 interpolation.
 
       toom3_interpolate(rp, an + bn, k, w0, w0n, w1, w1n, wm1, wm1n, wm1_neg, w2, w2n, winf, winfn)
-
-      # DEBUG: verify against Karatsuba using saved inputs
-      if @@toom3_debug
-        rn = an + bn
-        check = Pointer(Limb).malloc(rn)
-        kara_scratch = Pointer(Limb).malloc(karatsuba_scratch_size(an))
-        limbs_mul_karatsuba(check, ap_copy.not_nil!, an, bp_copy.not_nil!, bn, kara_scratch)
-        match = true
-        rn.times do |i|
-          if rp[i] != check[i]
-            STDERR.puts "TOOM3 MISMATCH at limb #{i}/#{rn} (an=#{an}, bn=#{bn}, k=#{k}): got #{rp[i]}, expected #{check[i]}"
-            # Print first few limbs of ap and bp
-            STDERR.puts "  ap[0..4]: #{(0...Math.min(5,an)).map{|j| ap_copy.not_nil![j]}.join(", ")}"
-            STDERR.puts "  bp[0..4]: #{(0...Math.min(5,bn)).map{|j| bp_copy.not_nil![j]}.join(", ")}"
-            STDERR.puts "  ap[k-1..k+1]: #{(Math.max(0,k-1)...Math.min(an,k+2)).map{|j| ap_copy.not_nil![j]}.join(", ")}"
-            STDERR.puts "  bp[k-1..k+1]: #{(Math.max(0,k-1)...Math.min(bn,k+2)).map{|j| bp_copy.not_nil![j]}.join(", ")}"
-            # Also dump the 5 products at the point of the mismatch
-            STDERR.puts "  w0[#{k}]: #{k < w0n ? w0[k] : "N/A"}"
-            STDERR.puts "  w1[0..2]: #{(0...Math.min(3,w1n)).map{|j| w1[j]}.join(", ")}"
-            STDERR.puts "  wm1[0..2]: #{(0...Math.min(3,wm1n)).map{|j| wm1[j]}.join(", ")}, neg=#{wm1_neg}"
-            match = false
-            break
-          end
-        end
-        STDERR.puts "TOOM3 VERIFY OK (an=#{an}, bn=#{bn}, k=#{k})" if match
-      end
     end
 
     # Evaluate p(1) = a0 + a1 + a2. Returns actual size of result in ea.
@@ -2184,9 +2147,7 @@ module BigNumber
       elsif bn < TOOM3_THRESHOLD
         limbs_mul_karatsuba(rp, ap, an, bp, bn, scratch)
       else
-        # Allocate fresh scratch to avoid aliasing (debug/correctness first)
-        fresh_scratch = Pointer(Limb).malloc(toom3_scratch_size(an))
-        limbs_mul_toom3(rp, ap, an, bp, bn, fresh_scratch)
+        limbs_mul_toom3(rp, ap, an, bp, bn, scratch)
       end
     end
 
@@ -2278,7 +2239,7 @@ module BigNumber
       limbs_rshift(c3, c3, c3n, 1) if c3n > 0
       # c3 -= t
       if tn > 0
-        c3n = Math.max(c3n, tn) if tn > c3n  # extend with existing zeros
+        c3n = Math.max(c3n, tn) if tn > c3n
         limbs_sub(c3, c3, c3n, t, tn)
       end
       # c3 -= 2*c2
