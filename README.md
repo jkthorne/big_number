@@ -32,6 +32,45 @@ A clean-room implementation of `BigInt`, `BigRational`, and `BigFloat` built ent
 
 **Standard library extensions** -- Seamless interop with Crystal's built-in numeric types via `to_big_i`, `to_big_f`, `to_big_r`, and mixed-type arithmetic operators.
 
+## Stdlib Drop-In Replacement
+
+You can use `big_number` as a drop-in replacement for Crystal's `require "big"` to eliminate the libgmp/GMP dependency entirely. Just swap one require line:
+
+```crystal
+# Replace:
+require "big"
+# With:
+require "big_number/stdlib"
+
+# Everything works the same -- no GMP linked
+x = BigInt.new("123456789" * 100)
+x.is_a?(Int)  # => true
+x * x          # pure Crystal
+```
+
+This provides top-level `BigInt`, `BigFloat`, `BigRational`, and `BigDecimal` types that inherit correctly (`BigInt < Int`, `BigFloat < Float`, etc.) so `is_a?` checks, method dispatch, and all stdlib-compatible APIs work as expected.
+
+### What's included
+
+- **Full API compatibility** -- constructors, arithmetic, comparison, bitwise, number theory, conversions, rounding
+- **Primitive extensions** -- `42.to_big_i`, `"1.5".to_big_f`, `0.5.to_big_r`, `"1.23".to_big_d`
+- **Cross-type arithmetic** -- `Int + BigInt`, `Float <=> BigRational`, `Number / BigDecimal`, etc.
+- **Math module** -- `Math.isqrt`, `Math.sqrt`, `Math.pw2ceil` for Big types
+- **Random** -- `Random#rand(BigInt)`, `Random#rand(Range(BigInt, BigInt))`
+- **Numeric hash equality** -- `BigInt.new(42).hash == 42.hash`
+- **JSON/YAML serialization** -- `to_json`, `from_json`, `from_yaml` for BigInt, BigFloat, BigDecimal
+
+```crystal
+require "big_number/stdlib"
+require "big_number/stdlib_json"  # optional: JSON support
+require "big_number/stdlib_yaml"  # optional: YAML support
+```
+
+### Limitations
+
+- **`to_unsafe`** is not provided -- there is no GMP pointer. C bindings that expect `LibGMP::MPZ` will not work.
+- **Performance** is within 2-3x of GMP for large numbers. Faster for single-limb ops (no FFI overhead).
+
 ## Installation
 
 Add the dependency to your `shard.yml`:
