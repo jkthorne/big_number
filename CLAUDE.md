@@ -7,12 +7,16 @@ Pure Crystal arbitrary-precision arithmetic library — zero C dependencies, no 
 ## Commands
 
 ```bash
-crystal spec                          # Run all tests
-crystal spec spec/big_number_spec.cr  # Run BigInt tests
-crystal spec spec/big_float_spec.cr   # Run BigFloat tests
-crystal spec spec/big_rational_spec.cr # Run BigRational tests
-crystal run bench/sanity.cr --release # Benchmark vs stdlib BigInt (libgmp)
-bench/sanity_bin 2>&1                 # Run precompiled benchmark
+crystal spec                              # Run all tests
+crystal spec spec/big_number_spec.cr      # Run BigInt tests
+crystal spec spec/big_float_spec.cr       # Run BigFloat tests
+crystal spec spec/big_rational_spec.cr    # Run BigRational tests
+crystal spec spec/stdlib_smoke_spec.cr    # Run stdlib wrapper tests
+crystal spec spec/stdlib_ext_spec.cr      # Run stdlib extensions tests
+crystal spec spec/stdlib_json_yaml_spec.cr # Run serialization tests
+crystal spec spec/stdlib_compat_spec.cr   # Run full compatibility tests
+crystal run bench/sanity.cr --release     # Benchmark vs stdlib BigInt (libgmp)
+bench/sanity_bin 2>&1                     # Run precompiled benchmark
 ```
 
 ## Architecture
