@@ -293,7 +293,7 @@ The two sets can't compile together (wrapper redefines `::BigDecimal`).
 
 Additional targeted tests:
 - Edge cases: zero, one, negative one, `LIMB_MAX`, powers of two
-- Boundary conditions: operands at exact algorithm thresholds (32, 90 limbs)
+- Boundary conditions: operands at exact algorithm thresholds (48 limbs for Karatsuba)
 - Division: divisor larger than dividend, single-limb divisor, exact division
 - String round-trip: `BigInt.new(x.to_s) == x` for all bases 2-36
 - Stdlib compatibility: type hierarchy (`is_a?`), cross-type arithmetic, hash equality
