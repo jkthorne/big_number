@@ -2,7 +2,7 @@
 
 Pure Crystal arbitrary-precision arithmetic -- zero C dependencies, no FFI, no GMP.
 
-A clean-room implementation of `BigInt`, `BigRational`, and `BigFloat` built entirely in Crystal using well-known algorithms from Knuth and the Handbook of Applied Cryptography.
+A clean-room implementation of `BigInt`, `BigRational`, `BigFloat`, and `BigDecimal` built entirely in Crystal using well-known algorithms from Knuth and the Handbook of Applied Cryptography.
 
 ## Features
 
@@ -31,7 +31,14 @@ A clean-room implementation of `BigInt`, `BigRational`, and `BigFloat` built ent
 - Constructed from integers, floats, rationals, or strings (`"1.23e-4"`)
 - Default precision of 128 bits, configurable per-value or globally
 
-**Standard library extensions** -- Seamless interop with Crystal's built-in numeric types via `to_big_i`, `to_big_f`, `to_big_r`, and mixed-type arithmetic operators.
+**BigDecimal** -- Fixed-scale decimal arithmetic, ported from Crystal's stdlib.
+
+- Arithmetic: `+`, `-`, `*`, `/`
+- Configurable scale for precision control
+- Constructed from integers, floats, or strings (`"1.23"`)
+- Exact decimal representation (no floating-point rounding)
+
+**Standard library extensions** -- Seamless interop with Crystal's built-in numeric types via `to_big_i`, `to_big_f`, `to_big_r`, `to_big_d`, and mixed-type arithmetic operators.
 
 ## Stdlib Drop-In Replacement
 
