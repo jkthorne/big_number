@@ -1,6 +1,7 @@
 module BigNumber
-  # Convert a finite float's truncated integer part to a BigInt.
-  # Uses binary decomposition to avoid precision loss from string conversion.
+  # Converts a finite float's truncated integer part to a `BigInt`.
+  # Uses binary decomposition of IEEE 754 representation to avoid precision loss
+  # from string conversion.
   protected def self.float_to_bigint(f : Float64) : BigInt
     return BigInt.new(0) if f == 0.0
     neg = f < 0
@@ -26,6 +27,24 @@ module BigNumber
     neg ? -result : result
   end
 
+  # Arbitrary-precision integer using sign-magnitude representation.
+  #
+  # Internally stores the magnitude as an array of `UInt64` limbs in
+  # least-significant-first order. The sign is encoded in `@size`:
+  # positive `@size` means a positive number, negative means negative,
+  # and zero means the value is zero.
+  #
+  # Supports the full range of integer arithmetic, bitwise operations,
+  # number theory (GCD, primality testing, modular exponentiation), and
+  # conversions. Multiplication uses schoolbook, Karatsuba, or NTT
+  # depending on operand size; division uses Knuth Algorithm D or
+  # Burnikel-Ziegler.
+  #
+  # ```
+  # a = BigNumber::BigInt.new("123456789012345678901234567890")
+  # b = BigNumber::BigInt.new(42)
+  # puts a * b # => 5185185138503358533451851851180
+  # ```
   struct BigInt
     include Comparable(BigInt)
     include Comparable(Int)
@@ -36,12 +55,18 @@ module BigNumber
 
     # --- Construction ---
 
+    # Creates a `BigInt` with value zero.
     def initialize
       @limbs = Pointer(Limb).null
       @alloc = 0
       @size = 0
     end
 
+    # Creates a `BigInt` from a signed integer primitive.
+    #
+    # ```
+    # BigNumber::BigInt.new(-42) # => -42
+    # ```
     def initialize(value : Int8 | Int16 | Int32 | Int64 | Int128)
       @limbs = Pointer(Limb).null
       @alloc = 0
@@ -56,6 +81,7 @@ module BigNumber
       @size = -@size if neg
     end
 
+    # Creates a `BigInt` from an unsigned integer primitive.
     def initialize(value : UInt8 | UInt16 | UInt32 | UInt64 | UInt128)
       @limbs = Pointer(Limb).null
       @alloc = 0
@@ -64,6 +90,14 @@ module BigNumber
       set_from_unsigned(value.to_u128)
     end
 
+    # Creates a `BigInt` by parsing a string in the given *base* (2 to 36).
+    # Supports optional leading `+` or `-` sign. Digits are parsed in chunks
+    # for efficiency using the largest chunk that fits in a `UInt64`.
+    #
+    # ```
+    # BigNumber::BigInt.new("ff", 16) # => 255
+    # BigNumber::BigInt.new("-101", 2) # => -5
+    # ```
     def initialize(str : String, base : Int32 = 10)
       @limbs = Pointer(Limb).null
       @alloc = 0
@@ -136,6 +170,12 @@ module BigNumber
       @size = -@size if neg && @size != 0
     end
 
+    # Creates a `BigInt` from an enumerable of digit values, least-significant first.
+    # Each digit must be in `0...base`.
+    #
+    # ```
+    # BigNumber::BigInt.from_digits([5, 4, 3, 2, 1], 10) # => 12345
+    # ```
     def self.from_digits(digits : Enumerable(Int), base : Int = 10) : self
       raise ArgumentError.new("Invalid base #{base}") if base < 2
       result = BigInt.new(0)
@@ -152,36 +192,43 @@ module BigNumber
 
     # --- Accessors ---
 
+    # Returns the number of limbs (absolute value of `@size`).
     @[AlwaysInline]
     def abs_size : Int32
       @size < 0 ? -@size : @size
     end
 
+    # Returns `true` if this integer is zero.
     @[AlwaysInline]
     def zero? : Bool
       @size == 0
     end
 
+    # Returns `true` if this integer is negative.
     @[AlwaysInline]
     def negative? : Bool
       @size < 0
     end
 
+    # Returns `true` if this integer is strictly positive.
     @[AlwaysInline]
     def positive? : Bool
       @size > 0
     end
 
+    # Returns `true` if this integer is even (or zero).
     @[AlwaysInline]
     def even? : Bool
       zero? || (@limbs[0] & 1_u64) == 0
     end
 
+    # Returns `true` if this integer is odd.
     @[AlwaysInline]
     def odd? : Bool
       !zero? && (@limbs[0] & 1_u64) == 1
     end
 
+    # Returns -1, 0, or 1 depending on the sign of this integer.
     @[AlwaysInline]
     def sign : Int32
       @size < 0 ? -1 : (@size > 0 ? 1 : 0)
@@ -189,6 +236,7 @@ module BigNumber
 
     # --- Comparison ---
 
+    # Compares this `BigInt` with another. Returns -1, 0, or 1.
     def <=>(other : BigInt) : Int32
       # Different signs: negative < zero < positive
       if @size != other.@size
@@ -203,6 +251,7 @@ module BigNumber
       @size < 0 ? -cmp : cmp
     end
 
+    # Compares with a primitive integer. Fast path avoids `BigInt` allocation.
     def <=>(other : Int) : Int32
       # Fast path: avoid allocation for single/zero-limb comparisons
       other_neg = other < 0
@@ -243,6 +292,8 @@ module BigNumber
       negative? ? -cmp : cmp
     end
 
+    # Compares with a float. Returns `nil` for NaN. Uses binary decomposition
+    # of the float to avoid precision loss.
     def <=>(other : Float::Primitive) : Int32?
       return nil if other.nan?
       if other.infinite?
@@ -265,6 +316,7 @@ module BigNumber
       end
     end
 
+    # Returns `true` if both `BigInt` values are equal (same sign and magnitude).
     def ==(other : BigInt) : Bool
       return false if @size != other.@size
       n = abs_size
@@ -274,6 +326,7 @@ module BigNumber
       true
     end
 
+    # Returns `true` if equal to a primitive integer. Fast path avoids allocation.
     def ==(other : Int) : Bool
       # Fast path: avoid allocation for small comparisons
       if other == 0
@@ -293,6 +346,7 @@ module BigNumber
       end
     end
 
+    # Feeds sign and limbs into the hasher for use in `Hash` and `Set`.
     def hash(hasher)
       hasher = @size.hash(hasher)
       abs_size.times do |i|
@@ -303,12 +357,14 @@ module BigNumber
 
     # --- Unary ---
 
+    # Returns the negation of this integer.
     def - : BigInt
       result = dup_value
       result.negate!
       result
     end
 
+    # Returns the absolute value.
     def abs : BigInt
       result = dup_value
       result.abs!
@@ -317,6 +373,8 @@ module BigNumber
 
     # --- Addition & Subtraction ---
 
+    # Returns the sum of two `BigInt` values. Uses a single-limb fast path
+    # when both operands fit in one limb.
     def +(other : BigInt) : BigInt
       return dup_value if other.zero?
       return other.dup_value if zero?
@@ -339,10 +397,12 @@ module BigNumber
       end
     end
 
+    # :ditto:
     def +(other : Int) : BigInt
       self + BigInt.new(other)
     end
 
+    # Returns the difference of two `BigInt` values.
     def -(other : BigInt) : BigInt
       return dup_value if other.zero?
       if zero?
@@ -369,12 +429,17 @@ module BigNumber
       end
     end
 
+    # :ditto:
     def -(other : Int) : BigInt
       self - BigInt.new(other)
     end
 
     # --- Multiplication ---
 
+    # Returns the product of two `BigInt` values.
+    # Dispatches to schoolbook (< 48 limbs), Karatsuba (48-24999 limbs),
+    # or NTT (>= 25000 limbs) multiplication based on operand size.
+    # Includes a single-limb fast path using `UInt128`.
     def *(other : BigInt) : BigInt
       return BigInt.new if zero? || other.zero?
 
@@ -414,6 +479,8 @@ module BigNumber
       result
     end
 
+    # Multiplies by a primitive integer. Fast path uses `limbs_mul_1` for
+    # single-limb multipliers, avoiding temporary `BigInt` allocation.
     def *(other : Int) : BigInt
       return BigInt.new if zero? || other == 0
       # Fast path: multiply by single limb without constructing a temporary BigInt
@@ -439,7 +506,10 @@ module BigNumber
 
     # --- Division ---
 
-    # Truncating division: quotient truncated toward zero, remainder same sign as dividend.
+    # Returns `{quotient, remainder}` with truncation toward zero (T-division).
+    # The remainder has the same sign as the dividend.
+    # Uses single-limb fast path, Knuth Algorithm D (< 80 limbs), or
+    # Burnikel-Ziegler (>= 80 limbs).
     def tdiv_rem(other : BigInt) : {BigInt, BigInt}
       raise DivisionByZeroError.new if other.zero?
       an = abs_size
@@ -503,7 +573,9 @@ module BigNumber
       {q, r}
     end
 
-    # Floor division and modulo (Crystal convention: result rounds toward -infinity)
+    # Returns `{quotient, modulus}` with floor division (F-division).
+    # The quotient rounds toward negative infinity, and the modulus has the
+    # same sign as the divisor. This is Crystal's convention for `//` and `%`.
     def divmod(other : BigInt) : {BigInt, BigInt}
       q, r = tdiv_rem(other)
       # If remainder is nonzero and signs of dividend and divisor differ, adjust
@@ -514,102 +586,129 @@ module BigNumber
       {q, r}
     end
 
+    # Returns the floor-division quotient (rounds toward negative infinity).
     def //(other : BigInt) : BigInt
       divmod(other)[0]
     end
 
+    # :ditto:
     def //(other : Int) : BigInt
       self // BigInt.new(other)
     end
 
+    # Returns the modulus (same sign as divisor, floor-division convention).
     def %(other : BigInt) : BigInt
       divmod(other)[1]
     end
 
+    # :ditto:
     def %(other : Int) : BigInt
       self % BigInt.new(other)
     end
 
+    # Returns the truncated quotient (rounds toward zero).
     def tdiv(other : BigInt) : BigInt
       tdiv_rem(other)[0]
     end
 
+    # Returns the truncated remainder (same sign as dividend).
     def tmod(other : BigInt) : BigInt
       tdiv_rem(other)[1]
     end
 
+    # Alias for `tmod` -- returns the truncated remainder.
     def remainder(other : BigInt) : BigInt
       tmod(other)
     end
 
+    # :ditto:
     def remainder(other : Int) : BigInt
       tmod(BigInt.new(other))
     end
 
-    # Wrapping ops — BigInt can't overflow, so these are identical to normal ops
+    # Wrapping addition -- identical to `+` since `BigInt` cannot overflow.
     def &+(other) : BigInt
       self + other
     end
 
+    # Wrapping subtraction -- identical to `-` since `BigInt` cannot overflow.
     def &-(other) : BigInt
       self - other
     end
 
+    # Wrapping multiplication -- identical to `*` since `BigInt` cannot overflow.
     def &*(other) : BigInt
       self * other
     end
 
-    # Unsafe division variants — same as safe versions for BigInt
+    # Unsafe floored division -- identical to `//` for `BigInt` (no overflow possible).
     def unsafe_floored_div(other : BigInt) : BigInt
       self // other
     end
 
+    # :ditto:
     def unsafe_floored_div(other : Int) : BigInt
       self // other
     end
 
+    # Unsafe floored mod -- identical to `%` for `BigInt`.
     def unsafe_floored_mod(other : BigInt) : BigInt
       self % other
     end
 
+    # :ditto:
     def unsafe_floored_mod(other : Int) : BigInt
       self % other
     end
 
+    # Unsafe floored divmod -- identical to `divmod` for `BigInt`.
     def unsafe_floored_divmod(other : BigInt) : {BigInt, BigInt}
       divmod(other)
     end
 
+    # :ditto:
     def unsafe_floored_divmod(other : Int) : {BigInt, BigInt}
       divmod(BigInt.new(other))
     end
 
+    # Unsafe truncated division -- identical to `tdiv` for `BigInt`.
     def unsafe_truncated_div(other : BigInt) : BigInt
       tdiv(other)
     end
 
+    # :ditto:
     def unsafe_truncated_div(other : Int) : BigInt
       tdiv(BigInt.new(other))
     end
 
+    # Unsafe truncated mod -- identical to `tmod` for `BigInt`.
     def unsafe_truncated_mod(other : BigInt) : BigInt
       tmod(other)
     end
 
+    # :ditto:
     def unsafe_truncated_mod(other : Int) : BigInt
       tmod(BigInt.new(other))
     end
 
+    # Unsafe truncated divmod -- identical to `tdiv_rem` for `BigInt`.
     def unsafe_truncated_divmod(other : BigInt) : {BigInt, BigInt}
       tdiv_rem(other)
     end
 
+    # :ditto:
     def unsafe_truncated_divmod(other : Int) : {BigInt, BigInt}
       tdiv_rem(BigInt.new(other))
     end
 
     # --- Exponentiation ---
 
+    # Raises this integer to the power *exp* using binary exponentiation
+    # (square-and-multiply). Raises `ArgumentError` for negative exponents.
+    #
+    # ```
+    # BigNumber::BigInt.new(2) ** 100 # => 1267650600228229401496703205376
+    # ```
     def **(exp : Int) : BigInt
       raise ArgumentError.new("Negative exponent #{exp}") if exp < 0
       return BigInt.new(1) if exp == 0
@@ -629,6 +728,14 @@ module BigNumber
       result
     end
 
+    # Computes `self ** exp % mod` efficiently.
+    # Uses Montgomery multiplication (REDC) for multi-limb odd moduli,
+    # falling back to standard square-and-multiply for even or single-limb moduli.
+    #
+    # ```
+    # base = BigNumber::BigInt.new(3)
+    # base.pow_mod(1000, BigNumber::BigInt.new(997)) # => 1
+    # ```
     def pow_mod(exp : BigInt, mod : BigInt) : BigInt
       raise ArgumentError.new("Negative exponent") if exp.negative?
       raise ArgumentError.new("Modulus must be positive") if !mod.positive?
@@ -658,8 +765,9 @@ module BigNumber
       result
     end
 
-    # Montgomery modular exponentiation for odd moduli.
-    # Uses Montgomery form to replace expensive division with multiply-and-shift.
+    # Montgomery modular exponentiation for odd moduli >= 2 limbs.
+    # Converts operands into Montgomery form (aR mod m), performs square-and-multiply
+    # with REDC, then converts back. Replaces expensive division with multiply-and-shift.
     private def montgomery_pow_mod(exp : BigInt, mod : BigInt) : BigInt
       mn = mod.abs_size
       m = mod.@limbs
@@ -699,14 +807,15 @@ module BigNumber
       mont_reduce(result_mont, mod, m_inv, mn)
     end
 
-    # Montgomery multiplication: compute (a * b * R^-1) mod m
+    # Montgomery multiplication: computes `(a * b * R^-1) mod m` where R = 2^(64*mn).
     private def mont_mul(a : BigInt, b : BigInt, mod : BigInt, m_inv : UInt64, mn : Int32) : BigInt
       # Product t = a * b (up to 2*mn limbs)
       t = a * b
       mont_reduce(t, mod, m_inv, mn)
     end
 
-    # Montgomery reduction (REDC): compute t * R^-1 mod m
+    # Montgomery reduction (REDC): computes `t * R^-1 mod m` using mn iterations
+    # of `limbs_addmul_1` with carry propagation and a final conditional subtraction.
     private def mont_reduce(t : BigInt, mod : BigInt, m_inv : UInt64, mn : Int32) : BigInt
       # Work on a mutable copy with enough space
       tn = mn * 2 + 2
@@ -751,20 +860,24 @@ module BigNumber
       result
     end
 
+    # :ditto:
     def pow_mod(exp : Int, mod : BigInt) : BigInt
       pow_mod(BigInt.new(exp), mod)
     end
 
+    # :ditto:
     def pow_mod(exp : Int, mod : BigInt) : BigInt
       pow_mod(BigInt.new(exp), mod)
     end
 
+    # :ditto:
     def pow_mod(exp : BigInt | Int, mod : Int) : BigInt
       pow_mod(BigInt.new(exp), BigInt.new(mod))
     end
 
     # --- Bitwise Operations ---
 
+    # Returns the bitwise NOT (two's complement): `~x = -(x + 1)`.
     def ~ : BigInt
       # ~x = -(x + 1)
       if negative?
@@ -776,6 +889,7 @@ module BigNumber
       end
     end
 
+    # Left-shifts by *count* bits. Negative counts shift right.
     def <<(count : Int) : BigInt
       return self >> (-count) if count < 0
       return dup_value if count == 0
@@ -804,6 +918,8 @@ module BigNumber
       result
     end
 
+    # Arithmetic right-shifts by *count* bits. For negative numbers, rounds
+    # toward negative infinity (floor division by 2^count).
     def >>(count : Int) : BigInt
       return self << (-count) if count < 0
       return dup_value if count == 0
@@ -853,10 +969,13 @@ module BigNumber
       result
     end
 
+    # Unsafe right-shift -- identical to `>>` for `BigInt`.
     def unsafe_shr(count : Int) : self
       self >> count
     end
 
+    # Returns the bit at position *index* (0 = LSB) as 0 or 1.
+    # For negative numbers, uses two's complement semantics with infinite sign extension.
     def bit(index : Int) : Int32
       return 0 if index < 0
       limb_idx = index.to_i32 // 64
@@ -890,6 +1009,8 @@ module BigNumber
       end
     end
 
+    # Returns the number of bits needed to represent the absolute value.
+    # Returns 1 for zero.
     def bit_length : Int32
       return 1 if zero?
       n = abs_size
@@ -897,6 +1018,8 @@ module BigNumber
       (n - 1) * 64 + (64 - top.leading_zeros_count.to_i32)
     end
 
+    # Returns the number of set bits in the binary representation.
+    # Returns `UInt64::MAX` for negative numbers (infinite 1-bits in two's complement).
     def popcount : Int
       return 0 if zero?
       # For negative numbers, two's complement has infinite 1-bits
@@ -906,6 +1029,7 @@ module BigNumber
       count
     end
 
+    # Returns the number of trailing zero bits. Returns 0 for zero.
     def trailing_zeros_count : Int
       return 0 if zero?
       n = abs_size
@@ -919,32 +1043,46 @@ module BigNumber
       0
     end
 
+    # Bitwise AND with two's complement semantics.
     def &(other : BigInt) : BigInt
       bitwise_op(other, :and)
     end
 
+    # :ditto:
     def &(other : Int) : BigInt
       self & BigInt.new(other)
     end
 
+    # Bitwise OR with two's complement semantics.
     def |(other : BigInt) : BigInt
       bitwise_op(other, :or)
     end
 
+    # :ditto:
     def |(other : Int) : BigInt
       self | BigInt.new(other)
     end
 
+    # Bitwise XOR with two's complement semantics.
     def ^(other : BigInt) : BigInt
       bitwise_op(other, :xor)
     end
 
+    # :ditto:
     def ^(other : Int) : BigInt
       self ^ BigInt.new(other)
     end
 
     # --- Number Theory ---
 
+    # Returns the greatest common divisor using binary GCD (Stein's algorithm).
+    # Uses only shifts and subtractions, avoiding expensive division.
+    #
+    # ```
+    # a = BigNumber::BigInt.new(48)
+    # b = BigNumber::BigInt.new(18)
+    # a.gcd(b) # => 6
+    # ```
     def gcd(other : BigInt) : BigInt
       a = self.abs
       b = other.abs
@@ -974,20 +1112,24 @@ module BigNumber
       a << k
     end
 
+    # :ditto:
     def gcd(other : Int) : Int
       gcd(BigInt.new(other)).to_i64
     end
 
+    # Returns the least common multiple: `|self * other| / gcd(self, other)`.
     def lcm(other : BigInt) : BigInt
       return BigInt.new if zero? || other.zero?
       g = gcd(other)
       (self // g * other).abs
     end
 
+    # :ditto:
     def lcm(other : Int) : BigInt
       lcm(BigInt.new(other))
     end
 
+    # Returns `self!` (factorial). Raises `ArgumentError` for negative values.
     def factorial : BigInt
       raise ArgumentError.new("Factorial of negative number") if negative?
       n = to_i64
@@ -1000,14 +1142,18 @@ module BigNumber
       result
     end
 
+    # Returns `true` if `self % number == 0`.
     def divisible_by?(number : BigInt) : Bool
       (self % number).zero?
     end
 
+    # :ditto:
     def divisible_by?(number : Int) : Bool
       (self % number).zero?
     end
 
+    # Returns the integer *n*-th root (floor). Uses Newton's method.
+    # Delegates to `sqrt` for `n == 2`. Raises for even roots of negative numbers.
     def root(n : Int) : BigInt
       raise ArgumentError.new("Zeroth root is undefined") if n == 0
       if negative?
@@ -1032,6 +1178,8 @@ module BigNumber
       x
     end
 
+    # Returns the integer square root (floor) using Newton's method.
+    # Raises `ArgumentError` for negative values.
     def sqrt : BigInt
       raise ArgumentError.new("Square root of negative number") if negative?
       return BigInt.new if zero?
@@ -1047,6 +1195,12 @@ module BigNumber
       x
     end
 
+    # Tests primality using deterministic Miller-Rabin with 12 witnesses.
+    # Deterministically correct for all numbers up to 3.3 * 10^24.
+    #
+    # ```
+    # BigNumber::BigInt.new(104729).prime? # => true
+    # ```
     def prime? : Bool
       # Quick checks without allocations
       if abs_size <= 1
@@ -1093,6 +1247,13 @@ module BigNumber
 
     # --- Conversion ---
 
+    # Converts the absolute value to a byte array. Raises for negative values.
+    # Uses big-endian byte order by default (most-significant byte first).
+    #
+    # ```
+    # BigNumber::BigInt.new(256).to_bytes              # => Bytes[1, 0]
+    # BigNumber::BigInt.new(256).to_bytes(big_endian: false) # => Bytes[0, 1]
+    # ```
     def to_bytes(big_endian : Bool = true) : Bytes
       raise ArgumentError.new("Cannot convert negative BigInt to bytes") if negative?
       if zero?
@@ -1127,6 +1288,12 @@ module BigNumber
       bytes
     end
 
+    # Creates a `BigInt` from a byte array. Assumes unsigned (non-negative) value.
+    # Uses big-endian byte order by default.
+    #
+    # ```
+    # BigNumber::BigInt.from_bytes(Bytes[1, 0]) # => 256
+    # ```
     def self.from_bytes(bytes : Bytes, big_endian : Bool = true) : BigInt
       # Strip leading zeros
       start = 0
@@ -1169,22 +1336,34 @@ module BigNumber
       result
     end
 
+    # Returns the decimal string representation.
     def to_s : String
       to_s(10)
     end
 
+    # Returns the string representation in the given *base* (2 to 36).
+    # Uses divide-and-conquer O(n*log^2 n) conversion for >= 50 limbs,
+    # otherwise simple O(n^2) repeated division.
+    #
+    # ```
+    # BigNumber::BigInt.new(255).to_s(16) # => "ff"
+    # ```
     def to_s(base : Int = 10, *, precision : Int = 1, upcase : Bool = false) : String
       String.build do |io|
         to_s(io, base, precision: precision, upcase: upcase)
       end
     end
 
+    # Writes the decimal string representation to *io*.
     def to_s(io : IO) : Nil
       to_s(io, 10)
     end
 
+    # Threshold (in limbs) above which divide-and-conquer base conversion is used.
     DC_TO_S_THRESHOLD = 50
 
+    # Writes the string representation in *base* to *io*. Dispatches to
+    # single-limb fast path, `simple_to_s`, or `dc_to_s` based on size.
     def to_s(io : IO, base : Int = 10, *, precision : Int = 1, upcase : Bool = false) : Nil
       raise ArgumentError.new("Invalid base #{base}") unless 2 <= base <= 36
       if zero?
@@ -1207,9 +1386,9 @@ module BigNumber
       end
     end
 
-    # Simple O(n²) base conversion for small numbers.
-    # Extracts digits in chunks for efficiency: divide by base^chunk_size to get
-    # chunk_size digits at once, then extract individual digits from the remainder.
+    # Simple O(n^2) base conversion for numbers below `DC_TO_S_THRESHOLD` limbs.
+    # Extracts digits in chunks: divides by `base^chunk_size` to get multiple
+    # digits at once, then extracts individual digits from the remainder.
     protected def self.simple_to_s(io : IO, limbs : Pointer(Limb), size : Int32, base : Int32, precision : Int32, upcase : Bool)
       tmp = Pointer(Limb).malloc(size)
       tmp.copy_from(limbs, size)
@@ -1262,8 +1441,10 @@ module BigNumber
       end
     end
 
-    # Divide-and-conquer base conversion: O(n·log²n).
-    # Precomputes powers of base, splits number in half, converts each half recursively.
+    # Divide-and-conquer base conversion: O(n*log^2 n).
+    # Precomputes a table of squaring powers of base, splits the number in half by
+    # dividing by a power of base, and recursively converts each half.
+    # Power table is cached in `@@power_cache` across calls for the same base.
     protected def self.dc_to_s(io : IO, limbs : Pointer(Limb), size : Int32, base : Int32, precision : Int32, upcase : Bool)
       # Estimate digit count: digits ≈ bit_length * log(2)/log(base)
       top = limbs[size - 1]
@@ -1304,12 +1485,12 @@ module BigNumber
     end
 
     # Cached base power tables keyed by base. Each entry is an array of
-    # powers: [base^chunk, base^(2*chunk), base^(4*chunk), ...] via squaring.
+    # squaring powers: `[base^chunk, base^(2*chunk), base^(4*chunk), ...]`.
     @@power_cache = Hash(Int32, Array(BigInt)).new
 
-    # Precompute powers: base^1, base^2, base^4, base^8, ... by repeated squaring
-    # Each power[i] splits off 2^i * chunk_size digits from the number.
-    # Caches and extends the table across calls for the same base.
+    # Precomputes squaring powers of base for divide-and-conquer base conversion.
+    # Each `power[i]` covers `2^i * chunk_size` digits. Results are cached in
+    # `@@power_cache` and extended as needed for larger numbers.
     protected def self.precompute_base_powers(base : Int32, max_digits : Int32) : Array(BigInt)
       chunk_size, _ = chunk_params(base)
 
@@ -1344,9 +1525,11 @@ module BigNumber
       powers
     end
 
-    # Recursively convert limb array np[0..nn-1] into buf[0..buf_len-1].
-    # level is the current power table index to split at.
-    # div_scratch is a pre-allocated buffer for Knuth Algorithm D (reused across levels).
+    # Recursive workhorse for divide-and-conquer base conversion.
+    # Splits `np[0..nn-1]` by dividing by `powers[level]`, writes high digits
+    # to `buf[0..hi_digits-1]` and low digits to `buf[hi_digits..]`.
+    # Falls back to simple extraction when `level < 0` or `nn < DC_TO_S_THRESHOLD`.
+    # *div_scratch* is pre-allocated and shared across all recursive levels.
     protected def self.dc_to_s_recurse_raw(buf : Pointer(UInt8), buf_len : Int32,
                                            np : Pointer(Limb), nn : Int32,
                                            base : Int32, powers : Array(BigInt), level : Int32,
@@ -1420,24 +1603,31 @@ module BigNumber
       dc_to_s_recurse_raw(buf + hi_digits, lo_digits, rp, rn, base, powers, level - 1, div_scratch)
     end
 
+    # Writes the decimal representation to *io* (same as `to_s`).
     def inspect(io : IO) : Nil
       to_s(io, 10)
     end
 
     # --- Checked integer conversions ---
+    # These methods convert to fixed-width integers with overflow checking.
+    # The `!` variants wrap/truncate on overflow instead of raising.
 
+    # Converts to `Int32`. Raises `OverflowError` if value doesn't fit.
     def to_i : Int32
       to_i32
     end
 
+    # Wrapping conversion to `Int32` (truncates on overflow).
     def to_i! : Int32
       to_i32!
     end
 
+    # Converts to `UInt32`. Raises `OverflowError` if value doesn't fit.
     def to_u : UInt32
       to_u32
     end
 
+    # Wrapping conversion to `UInt32` (truncates on overflow).
     def to_u! : UInt32
       to_u32!
     end
@@ -1483,22 +1673,28 @@ module BigNumber
       end
     {% end %}
 
+    # Converts to `Float64`. May lose precision for large values; returns infinity
+    # if the magnitude exceeds `Float64::MAX`.
     def to_f : Float64
       to_f64
     end
 
+    # :ditto:
     def to_f! : Float64
       to_f64
     end
 
+    # Converts to `Float32` via `Float64`.
     def to_f32 : Float32
       to_f64.to_f32
     end
 
+    # :ditto:
     def to_f32! : Float32
       to_f64.to_f32
     end
 
+    # Converts to `Float64` using the top two limbs for correct rounding at any size.
     def to_f64 : Float64
       return 0.0 if zero?
       n = abs_size
@@ -1517,26 +1713,37 @@ module BigNumber
       negative? ? -result : result
     end
 
+    # :ditto:
     def to_f64! : Float64
       to_f64
     end
 
+    # Returns `self` (no-op identity conversion).
     def to_big_i : BigInt
       self
     end
 
+    # Converts to `BigFloat` with the given precision (in bits).
     def to_big_f(*, precision : Int32 = BigFloat.default_precision) : BigFloat
       BigFloat.new(self, precision: precision)
     end
 
+    # Converts to `BigRational` with denominator 1.
     def to_big_r : BigRational
       BigRational.new(self)
     end
 
+    # Converts to `BigDecimal` with scale 0.
     def to_big_d : BigDecimal
       BigDecimal.new(self)
     end
 
+    # Returns the digits in *base* as an `Array(Int32)`, least-significant first.
+    # Raises for negative numbers or invalid base.
+    #
+    # ```
+    # BigNumber::BigInt.new(123).digits # => [3, 2, 1]
+    # ```
     def digits(base : Int = 10) : Array(Int32)
       raise ArgumentError.new("Can't request digits of negative number") if negative?
       raise ArgumentError.new("Invalid base #{base}") unless base >= 2
@@ -1555,11 +1762,14 @@ module BigNumber
 
     # --- Misc ---
 
+    # Returns the smallest power of two >= `self`. Returns 1 for non-positive values.
     def next_power_of_two : BigInt
       return BigInt.new(1) if @size <= 0
       popcount == 1 ? dup_value : BigInt.new(1) << bit_length
     end
 
+    # Divides out all factors of *number* from `|self|`.
+    # Returns `{remaining, count}` where `count` is how many times *number* divides evenly.
     def factor_by(number : Int) : {BigInt, UInt64}
       raise ArgumentError.new("Can't factor by #{number}") if number <= 1
       d = BigInt.new(number)
@@ -1574,33 +1784,41 @@ module BigNumber
       {current, count}
     end
 
+    # Returns a deep copy.
     def clone : BigInt
       dup_value
     end
 
     # --- Protected helpers exposed to other BigInt methods ---
 
+    # Creates a `BigInt` with pre-allocated limb storage of the given capacity.
+    # Value is zero until limbs are filled and `set_size` is called.
     protected def initialize(*, capacity : Int32)
       @limbs = Pointer(Limb).malloc(capacity)
       @alloc = capacity
       @size = 0
     end
 
+    # Sets the signed size directly. Positive = positive, negative = negative.
     protected def set_size(@size : Int32)
     end
 
+    # Returns a raw pointer to the limb array.
     protected def limbs_ptr : Pointer(Limb)
       @limbs
     end
 
+    # Negates in place by flipping the sign of `@size`.
     protected def negate!
       @size = -@size
     end
 
+    # Makes the value non-negative in place.
     protected def abs!
       @size = abs_size
     end
 
+    # Ensures the limb array can hold at least *n* limbs. Doubles capacity on growth.
     protected def ensure_capacity(n : Int32)
       return if @alloc >= n
       new_alloc = Math.max(n, @alloc * 2)
@@ -1613,6 +1831,7 @@ module BigNumber
       @alloc = new_alloc
     end
 
+    # Strips leading zero limbs, adjusting `@size` while preserving sign.
     protected def normalize!
       n = @size < 0 ? -@size : @size
       while n > 0 && @limbs[n - 1] == 0
@@ -1621,6 +1840,7 @@ module BigNumber
       @size = @size < 0 ? -n : n
     end
 
+    # Creates a deep copy of this `BigInt` with independent limb storage.
     protected def dup_value : BigInt
       n = abs_size
       return BigInt.new if n == 0
@@ -1632,6 +1852,7 @@ module BigNumber
 
     # --- Private ---
 
+    # Extracts value as `Int128` from the bottom two limbs (no range check).
     private def to_i128_internal : Int128
       return 0_i128 if zero?
       n = abs_size
@@ -1640,6 +1861,7 @@ module BigNumber
       negative? ? (0_i128 &- val.to_i128!) : val.to_i128!
     end
 
+    # Extracts magnitude as `UInt128` from the bottom two limbs (no range check).
     private def to_u128_internal : UInt128
       return 0_u128 if zero?
       n = abs_size
@@ -1648,9 +1870,9 @@ module BigNumber
       val
     end
 
-    # Bitwise operation on two BigInts with two's complement semantics.
-    # For negative x, two's complement is ~(|x| - 1).
-    # We case-split on signs to avoid allocating two's complement arrays.
+    # Applies a bitwise operation (AND, OR, XOR) with two's complement semantics.
+    # For negative x, two's complement is `~(|x| - 1)`. Both-positive case uses
+    # a fast path without two's complement conversion.
     private def bitwise_op(other : BigInt, op : Symbol) : BigInt
       # Both positive: direct limb-by-limb
       if !negative? && !other.negative?
@@ -1717,6 +1939,7 @@ module BigNumber
       result
     end
 
+    # Fast-path bitwise operation when both operands are non-negative (no two's complement needed).
     private def bitwise_pos_pos(other : BigInt, op : Symbol) : BigInt
       an = abs_size
       bn = other.abs_size
@@ -1759,6 +1982,7 @@ module BigNumber
       end
     end
 
+    # Initializes limbs from a `UInt128` magnitude value.
     private def set_from_unsigned(mag : UInt128)
       lo = mag.to_u64!
       hi = (mag >> 64).to_u64!
@@ -1774,6 +1998,7 @@ module BigNumber
       end
     end
 
+    # Adds the magnitudes of `self` and *other*, returning a new `BigInt` with the given sign.
     protected def add_magnitudes(other : BigInt, result_negative : Bool = @size < 0) : BigInt
       an = abs_size
       bn = other.abs_size
@@ -1799,6 +2024,7 @@ module BigNumber
       result
     end
 
+    # Subtracts magnitudes, determining result sign from which is larger.
     private def sub_magnitudes(other : BigInt) : BigInt
       an = abs_size
       bn = other.abs_size
@@ -1824,8 +2050,11 @@ module BigNumber
     end
 
     # --- Class-level limb array operations ---
+    # Low-level operations on raw limb pointers. These form the computational
+    # core of all arithmetic. ARM64 builds use inline assembly for inner loops;
+    # other architectures use UInt128-based fallbacks.
 
-    # Compare two unsigned limb arrays. Returns -1, 0, or 1.
+    # Compares two unsigned limb arrays. Returns -1, 0, or 1.
     protected def self.limbs_cmp(ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32) : Int32
       return 1 if an > bn
       return -1 if an < bn
@@ -1838,7 +2067,8 @@ module BigNumber
       0
     end
 
-    # Add two unsigned limb arrays. an >= bn. Returns carry (0 or 1).
+    # Adds two unsigned limb arrays: `rp = ap + bp`. Requires `an >= bn`.
+    # Returns carry (0 or 1). Uses ARM64 `adds`/`adc` inline assembly when available.
     protected def self.limbs_add(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32) : Limb
       carry = 0_u64
       i = 0
@@ -1893,7 +2123,8 @@ module BigNumber
       carry
     end
 
-    # Subtract two unsigned limb arrays. ap >= bp (magnitude). an >= bn. Returns borrow.
+    # Subtracts two unsigned limb arrays: `rp = ap - bp`. Requires `ap >= bp` in magnitude
+    # and `an >= bn`. Returns borrow. Uses ARM64 `subs`/`cset`/`cinc` inline assembly.
     protected def self.limbs_sub(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32) : Limb
       borrow = 0_u64
       i = 0
@@ -1950,7 +2181,8 @@ module BigNumber
       borrow
     end
 
-    # Add a single limb to a limb array. Returns carry.
+    # Adds a single limb to a limb array: `rp = ap + b`. Returns carry.
+    # Uses ARM64 inline assembly when available.
     protected def self.limbs_add_1(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, b : Limb) : Limb
       {% if flag?(:aarch64) %}
         carry = b
@@ -1984,7 +2216,8 @@ module BigNumber
       {% end %}
     end
 
-    # Multiply a limb array by a single limb. Returns carry.
+    # Multiplies a limb array by a single limb: `rp = ap * b`. Returns carry.
+    # Uses ARM64 `mul`/`umulh` inline assembly when available.
     protected def self.limbs_mul_1(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, b : Limb) : Limb
       carry = 0_u64
       i = 0
@@ -2019,7 +2252,9 @@ module BigNumber
       carry
     end
 
-    # rp[] += ap[] * b. Returns carry out.
+    # Fused multiply-add: `rp += ap * b`. Returns carry out.
+    # Core inner loop for schoolbook multiplication.
+    # Uses ARM64 `mul`/`umulh`/`adds`/`adc` inline assembly when available.
     protected def self.limbs_addmul_1(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, b : Limb) : Limb
       carry = 0_u64
       i = 0
@@ -2057,7 +2292,9 @@ module BigNumber
       carry
     end
 
-    # rp[] -= ap[] * b. Returns borrow out.
+    # Fused multiply-subtract: `rp -= ap * b`. Returns borrow out.
+    # Core inner loop for Knuth Algorithm D division.
+    # Uses ARM64 inline assembly when available.
     protected def self.limbs_submul_1(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, b : Limb) : Limb
       borrow = 0_u64
       i = 0
@@ -2097,11 +2334,15 @@ module BigNumber
       borrow
     end
 
+    # Limb count threshold: schoolbook -> Karatsuba.
     KARATSUBA_THRESHOLD = 48
-    TOOM3_THRESHOLD     = 10_000 # Effectively disabled: Karatsuba beats Toom-3 up to ~4000 limbs
+    # Limb count threshold: Karatsuba -> Toom-3 (effectively disabled; Karatsuba wins).
+    TOOM3_THRESHOLD     = 10_000
+    # Limb count threshold: Karatsuba -> NTT (Goldilocks prime).
     NTT_THRESHOLD       = 25_000
 
-    # Top-level multiply dispatch. an >= bn > 0. rp must not alias ap or bp.
+    # Top-level multiply dispatch. Requires `an >= bn > 0`. Result buffer `rp`
+    # must not alias `ap` or `bp` and must have room for `an + bn` limbs.
     protected def self.limbs_mul(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32)
       if bn < KARATSUBA_THRESHOLD
         limbs_mul_schoolbook(rp, ap, an, bp, bn)
@@ -2113,7 +2354,8 @@ module BigNumber
       end
     end
 
-    # Schoolbook multiply: O(an*bn).
+    # Schoolbook (grade-school) multiplication: O(an * bn). Zeros the result
+    # buffer then accumulates partial products via `limbs_addmul_1`.
     protected def self.limbs_mul_schoolbook(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32)
       (an + bn).times { |i| rp[i] = 0_u64 }
       i = 0
@@ -2124,8 +2366,11 @@ module BigNumber
       end
     end
 
-    # Karatsuba multiply: O(n^1.585).
-    # rp must have space for an+bn limbs. scratch must have karatsuba_scratch_size(an) limbs.
+    # Karatsuba multiplication: O(n^1.585). Splits operands at the midpoint,
+    # computes z0 = a0*b0, z2 = a1*b1, z1 = (a0+a1)*(b0+b1) - z0 - z2,
+    # and combines: result = z0 + z1*B^m + z2*B^(2m).
+    # Falls back to schoolbook below `KARATSUBA_THRESHOLD` and handles
+    # unbalanced operands (an >= 2*bn) by slicing into chunks.
     protected def self.limbs_mul_karatsuba(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
       if bn < KARATSUBA_THRESHOLD
         limbs_mul_schoolbook(rp, ap, an, bp, bn)
@@ -2226,7 +2471,9 @@ module BigNumber
       end
     end
 
-    # Handle unbalanced multiply: an >= 2*bn. Slice a into bn-sized chunks.
+    # Handles unbalanced multiplication when `an >= 2*bn`. Slices the larger
+    # operand into `bn`-sized chunks, multiplies each chunk by `bp`, and
+    # accumulates results with proper offsets.
     protected def self.limbs_mul_unbalanced(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
       # Zero the result
       (an + bn).times { |i| rp[i] = 0_u64 }
@@ -2252,8 +2499,8 @@ module BigNumber
       end
     end
 
-    # Internal dispatch for recursive multiply (Karatsuba/Toom3 callers).
-    # Assumes scratch is already allocated and large enough.
+    # Internal dispatch for recursive multiply within Karatsuba/Toom-3.
+    # Selects schoolbook, Karatsuba, or Toom-3 based on `bn`.
     protected def self.limbs_mul_dispatch(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
       if bn < KARATSUBA_THRESHOLD
         limbs_mul_schoolbook(rp, ap, an, bp, bn)
@@ -2264,12 +2511,14 @@ module BigNumber
       end
     end
 
+    # Computes scratch buffer size needed for Karatsuba multiplication of *n* limbs.
     protected def self.karatsuba_scratch_size(n : Int32) : Int32
       # Each Karatsuba level needs ~4*(n/2+1) scratch plus recursive scratch.
       # S(n) = 4*(n/2+1) + S(n/2+1) ≈ 4n. Add 2*n for unbalanced multiply tmp buffer.
       Math.max(6 * n + 64, 256)
     end
 
+    # Computes scratch buffer size needed for Toom-3 multiplication of *n* limbs.
     protected def self.toom3_scratch_size(n : Int32) : Int32
       # Toom-3 scratch layout (k = ceil(n/3), pn = 2*(k+1)):
       #   [w0 | w1 | wm1 | w2 | winf | ea | eb | interp_c2 | interp_t | interp_tmp8 | eval_tmp | recursive_scratch]
@@ -2279,10 +2528,11 @@ module BigNumber
       Math.max(24 * n + 512, 2048)
     end
 
-    # Toom-Cook 3-way multiply: O(n^1.465).
-    # Splits each operand into 3 pieces, evaluates at 5 points {0, 1, -1, 2, ∞},
-    # does 5 recursive multiplications of ~n/3 size, then interpolates.
-    # Requires an >= bn >= TOOM3_THRESHOLD. rp must have space for an+bn limbs.
+    # Toom-Cook 3-way multiplication: O(n^1.465).
+    # Splits each operand into 3 pieces of ~n/3 limbs, evaluates at 5 points
+    # {0, 1, -1, 2, infinity}, performs 5 recursive multiplications, then recovers
+    # coefficients via interpolation. Currently effectively disabled since
+    # `TOOM3_THRESHOLD > NTT_THRESHOLD` in practice.
     protected def self.limbs_mul_toom3(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
       if bn < TOOM3_THRESHOLD
         if bn < KARATSUBA_THRESHOLD
@@ -2438,7 +2688,7 @@ module BigNumber
       toom3_interpolate(rp, an + bn, k, w0, w0n, w1, w1n, wm1, wm1n, wm1_neg, w2, w2n, winf, winfn, interp_c2, interp_t, interp_tmp)
     end
 
-    # Evaluate p(1) = a0 + a1 + a2. Returns actual size of result in ea.
+    # Toom-3 evaluation at point 1: computes `ea = a0 + a1 + a2`. Returns result size.
     protected def self.toom3_eval_pos(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32) : Int32
       # ea = a0 + a1
       if a0n >= a1n
@@ -2468,7 +2718,8 @@ module BigNumber
       ean
     end
 
-    # Evaluate p(-1) = a0 - a1 + a2. Returns {size, negative}.
+    # Toom-3 evaluation at point -1: computes `ea = a0 - a1 + a2`.
+    # Returns `{size, negative}` since the result may be negative.
     protected def self.toom3_eval_neg(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32) : {Int32, Bool}
       # First compute t = a0 + a2
       if a0n >= a2n
@@ -2504,8 +2755,8 @@ module BigNumber
       {tn, neg}
     end
 
-    # Evaluate p(2) = a0 + 2*a1 + 4*a2. Returns actual size.
-    # Uses a small temp buffer to compute 2*a1 and 4*a2 cleanly.
+    # Toom-3 evaluation at point 2: computes `ea = a0 + 2*a1 + 4*a2`.
+    # Uses *tmp* for shifted intermediates. Returns result size.
     protected def self.toom3_eval_at2(ea : Pointer(Limb), a0 : Pointer(Limb), a0n : Int32, a1 : Pointer(Limb), a1n : Int32, a2 : Pointer(Limb), a2n : Int32, tmp : Pointer(Limb)) : Int32
       # Start with a0
       if a0n > 0
@@ -2549,7 +2800,8 @@ module BigNumber
       ean
     end
 
-    # Recursive multiply helper for Toom-3 evaluations.
+    # Recursive multiply helper for Toom-3 evaluation products.
+    # Ensures `an >= bn` then dispatches to the appropriate algorithm.
     protected def self.toom3_mul_recurse(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32, scratch : Pointer(Limb))
       # Ensure an >= bn
       if an < bn
@@ -2703,18 +2955,20 @@ module BigNumber
       limbs_add(rp + 3 * k, rp + 3 * k, rn - 3 * k, c3, c3n) if c3n > 0
     end
 
-    # --- NTT-based multiplication for very large numbers ---
-    # Uses the Goldilocks prime p = 2^64 - 2^32 + 1 with 32-bit limb splitting.
-    # Each 64-bit limb is split into two 32-bit halves, so convolution coefficients
-    # stay below n * (2^32-1)^2 < p for n < 2^32 (billions of limbs).
-    # This avoids multi-prime CRT and enables fast Goldilocks modular reduction.
+    # --- NTT-based multiplication for very large numbers (>= 25,000 limbs) ---
+    # Uses Number Theoretic Transform with the Goldilocks prime p = 2^64 - 2^32 + 1.
+    # Each 64-bit limb is split into two 32-bit halves so convolution coefficients
+    # stay below `n * (2^32 - 1)^2 < p` for `n < 2^32` (billions of limbs).
+    # This avoids multi-prime CRT and enables fast Goldilocks modular reduction
+    # (no 128-bit division). Achieves O(n log n) multiplication.
 
-    NTT_P = 0xFFFFFFFF00000001_u64 # 2^64 - 2^32 + 1 (Goldilocks prime)
-    NTT_G = 7_u64                   # primitive root mod NTT_P
+    # Goldilocks prime: p = 2^64 - 2^32 + 1.
+    NTT_P = 0xFFFFFFFF00000001_u64
+    # Primitive root mod `NTT_P`.
+    NTT_G = 7_u64
 
-    # Goldilocks modular reduction: (a * b) mod p without 128-bit division.
-    # p = 2^64 - 2^32 + 1, so 2^64 ≡ 2^32 - 1 (mod p).
-    # For product = hi * 2^64 + lo, result ≡ lo + hi * (2^32 - 1) (mod p).
+    # Goldilocks modular reduction: computes `(a * b) mod p` without 128-bit division.
+    # Exploits `2^64 = 2^32 - 1 (mod p)` for fast reduction via shifts and subtracts.
     @[AlwaysInline]
     private def self.goldilocks_mulmod(a : UInt64, b : UInt64) : UInt64
       prod = a.to_u128 &* b.to_u128
@@ -2758,7 +3012,7 @@ module BigNumber
       lo2 >= p ? lo2 &- p : lo2
     end
 
-    # Modular exponentiation mod Goldilocks prime
+    # Modular exponentiation mod Goldilocks prime using square-and-multiply.
     private def self.goldilocks_powmod(base : UInt64, exp : UInt64) : UInt64
       result = 1_u64
       b = base % NTT_P
@@ -2771,7 +3025,8 @@ module BigNumber
       result
     end
 
-    # In-place iterative NTT using Goldilocks prime.
+    # In-place iterative Cooley-Tukey NTT (forward transform) using Goldilocks prime.
+    # Performs bit-reversal permutation then log2(n) butterfly stages.
     private def self.ntt_forward(data : Pointer(UInt64), n : Int32, g : UInt64)
       p = NTT_P
       # Bit-reversal permutation
@@ -2814,7 +3069,7 @@ module BigNumber
       end
     end
 
-    # Inverse NTT
+    # Inverse NTT: forward transform with inverse root, then multiply by `n^-1 mod p`.
     private def self.ntt_inverse(data : Pointer(UInt64), n : Int32, g : UInt64)
       g_inv = goldilocks_powmod(g, NTT_P - 2)
       ntt_forward(data, n, g_inv)
@@ -2826,9 +3081,10 @@ module BigNumber
       end
     end
 
-    # NTT-based multiplication for large limb arrays.
-    # Splits each 64-bit limb into two 32-bit halves, performs convolution
-    # using the Goldilocks prime, then reconstructs with carry propagation.
+    # NTT-based multiplication for large limb arrays (>= `NTT_THRESHOLD` limbs).
+    # Splits each 64-bit limb into two 32-bit halves, performs cyclic convolution
+    # using forward NTT, pointwise multiply, and inverse NTT, then reconstructs
+    # 64-bit limbs with carry propagation. O(n log n) time complexity.
     protected def self.limbs_mul_ntt(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32)
       # Split into 32-bit pieces: 2*an and 2*bn elements
       sa = an * 2
@@ -2887,9 +3143,8 @@ module BigNumber
       end
     end
 
-    # Divide limb array by a single limb. Returns remainder.
-    # qp[0..n-1] = ap[0..n-1] / d, returns ap mod d.
-    # qp may alias ap.
+    # Divides a limb array by a single limb. Stores quotient in `qp` (may alias `ap`).
+    # Returns the remainder. Uses 128-bit division for each limb pair.
     protected def self.limbs_div_rem_1(qp : Pointer(Limb), ap : Pointer(Limb), n : Int32, d : Limb) : Limb
       raise DivisionByZeroError.new if d == 0
       rem = 0_u128
@@ -2903,7 +3158,8 @@ module BigNumber
       rem.to_u64!
     end
 
-    # Left-shift limb array by shift bits (0 < shift < 64). Returns bits shifted out of top.
+    # Left-shifts a limb array by *shift* bits (0 < shift < 64).
+    # Returns the bits shifted out of the top limb.
     protected def self.limbs_lshift(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, shift : Int32) : Limb
       return 0_u64 if shift == 0
       complement = 64 - shift
@@ -2918,7 +3174,8 @@ module BigNumber
       carry
     end
 
-    # Right-shift limb array by shift bits (0 < shift < 64). Returns bits shifted out of bottom.
+    # Right-shifts a limb array by *shift* bits (0 < shift < 64).
+    # Returns the bits shifted out of the bottom limb.
     protected def self.limbs_rshift(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, shift : Int32) : Limb
       return 0_u64 if shift == 0
       complement = 64 - shift
@@ -2933,9 +3190,12 @@ module BigNumber
       carry
     end
 
-    # Knuth Algorithm D: divide np[0..nn-1] by dp[0..dn-1].
-    # Stores quotient in qp[0..nn-dn], remainder in rp[0..dn-1].
-    # Requires nn >= dn >= 2, and dp[dn-1] != 0.
+    # Knuth Algorithm D (TAOCP 4.3.1): multi-limb division.
+    # Divides `np[0..nn-1]` by `dp[0..dn-1]`, storing quotient in `qp` and
+    # remainder in `rp`. Normalizes the divisor so its top limb has its high
+    # bit set, estimates each quotient digit with a 2-by-1 trial division,
+    # refines the estimate, and applies add-back correction when needed.
+    # Requires `nn >= dn >= 2` and `dp[dn-1] != 0`.
     protected def self.limbs_div_rem(qp : Pointer(Limb), rp : Pointer(Limb),
                                      np : Pointer(Limb), nn : Int32,
                                      dp : Pointer(Limb), dn : Int32,
@@ -3000,9 +3260,12 @@ module BigNumber
       end
     end
 
+    # Limb count threshold: Knuth Algorithm D -> Burnikel-Ziegler division.
     BZ_THRESHOLD = 80
 
-    # Burnikel-Ziegler division entry point. Allocates arena upfront, then delegates.
+    # Burnikel-Ziegler division entry point for divisors >= `BZ_THRESHOLD` limbs.
+    # Allocates a `LimbArena` bump allocator upfront to avoid per-recursion malloc,
+    # then delegates to the recursive inner implementation.
     protected def self.limbs_div_rem_bz(qp : Pointer(Limb), rp : Pointer(Limb),
                                          np : Pointer(Limb), nn : Int32,
                                          dp : Pointer(Limb), dn : Int32)
@@ -3018,6 +3281,9 @@ module BigNumber
       limbs_div_rem_bz_inner(qp, rp, np, nn, dp, dn, arena)
     end
 
+    # Recursive Burnikel-Ziegler division. For `nn <= 2*dn`, performs a single
+    # 2n-by-n division. For larger dividends, processes in blocks from most
+    # significant to least significant.
     protected def self.limbs_div_rem_bz_inner(qp : Pointer(Limb), rp : Pointer(Limb),
                                                 np : Pointer(Limb), nn : Int32,
                                                 dp : Pointer(Limb), dn : Int32,
@@ -3088,7 +3354,9 @@ module BigNumber
       rp.copy_from(rem, dn)
     end
 
-    # Core B-Z: divide A[0..2n-1] by B[0..n-1].
+    # Core Burnikel-Ziegler primitive: divides `A[0..2n-1]` by `B[0..n-1]`.
+    # Splits the dividend into two halves and performs two 3n-by-2n divisions.
+    # Falls back to Knuth Algorithm D for `n < 60`.
     protected def self.bz_div_2n_by_n(qp : Pointer(Limb), rp : Pointer(Limb),
                                        ap : Pointer(Limb), bp : Pointer(Limb), n : Int32,
                                        arena : LimbArena)
@@ -3114,7 +3382,9 @@ module BigNumber
       bz_div_3n_by_2n(qp, rp, a_lo, bp, n, k, arena)
     end
 
-    # Divide A[0..n+k-1] by B[0..n-1] where k = block size.
+    # Burnikel-Ziegler 3n-by-2n division: divides `A[0..n+k-1]` by `B[0..n-1]`
+    # where `k = ceil(n/2)`. Computes trial quotient by dividing the top portion
+    # by `B`'s upper half, then corrects with add-back if needed.
     protected def self.bz_div_3n_by_2n(qp : Pointer(Limb), rp : Pointer(Limb),
                                         ap : Pointer(Limb), bp : Pointer(Limb),
                                         n : Int32, k : Int32, arena : LimbArena)
@@ -3206,8 +3476,9 @@ module BigNumber
       end
     end
 
-# Returns {chunk_size, base^chunk_size} for string parsing.
-    # chunk_size is the largest k such that base^k fits in UInt64.
+    # Returns `{chunk_size, base^chunk_size}` for chunked string parsing/conversion.
+    # `chunk_size` is the largest *k* such that `base^k` fits in a `UInt64`.
+    # Common bases (2, 8, 10, 16) use precomputed values.
     protected def self.chunk_params(base : Int32) : {Int32, UInt64}
       # Precomputed for common bases
       case base
@@ -3227,6 +3498,7 @@ module BigNumber
       end
     end
 
+    # Converts a character to its digit value in the given base. Raises for invalid digits.
     protected def self.char_to_digit(c : Char, base : Int32) : Int32
       d = case c
           when '0'..'9' then c.ord - '0'.ord
@@ -3238,6 +3510,7 @@ module BigNumber
       d
     end
 
+    # Converts a digit value (0-35) to its character representation ('0'-'9', 'a'-'z').
     protected def self.digit_to_char(d : UInt8) : Char
       if d < 10
         ('0'.ord + d).chr
