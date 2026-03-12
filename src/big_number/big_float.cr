@@ -1,20 +1,46 @@
 module BigNumber
+  # Arbitrary-precision binary floating-point number with configurable precision.
+  #
+  # Internally represented as `sign * mantissa * 2^exponent`, where *mantissa* is a
+  # `BigInt` normalized to exactly *precision* bits, *exponent* is an `Int64`, and
+  # *sign* is -1, 0, or 1. The default precision is 128 bits.
+  #
+  # Unlike hardware floats, `BigFloat` never produces NaN or infinity -- it raises
+  # on invalid operations instead.
+  #
+  # ```
+  # a = BigNumber::BigFloat.new("3.14159", precision: 256)
+  # b = BigNumber::BigFloat.new(2)
+  # a / b # => 1.570795 (at 256-bit precision)
+  # ```
   struct BigFloat
     include Comparable(BigFloat)
     include Comparable(Int)
     include Comparable(BigInt)
 
+    # Returns the absolute value of the mantissa as a `BigInt`.
     getter mantissa : BigInt
+
+    # Returns the binary exponent. The value equals `sign * mantissa * 2^exponent`.
     getter exponent : Int64
+
+    # Returns the sign: -1, 0, or 1.
     getter sign : Int8
+
+    # Returns the precision of this value in bits.
     getter precision : Int32
 
+    # The default precision (in bits) used when none is specified. Initially 128.
     @@default_precision : Int32 = 128
 
+    # Returns the current default precision in bits.
     def self.default_precision : Int32
       @@default_precision
     end
 
+    # Sets the default precision in bits for newly created `BigFloat` values.
+    #
+    # Raises `ArgumentError` if *value* is not positive.
     def self.default_precision=(value : Int32)
       raise ArgumentError.new("Precision must be positive") unless value > 0
       @@default_precision = value
@@ -22,6 +48,7 @@ module BigNumber
 
     # --- Constructors ---
 
+    # Creates a zero-valued `BigFloat` with the default precision.
     def initialize
       @mantissa = BigInt.new
       @exponent = 0_i64
@@ -29,6 +56,7 @@ module BigNumber
       @precision = @@default_precision
     end
 
+    # Creates a zero-valued `BigFloat` with the given *precision* in bits.
     def initialize(*, precision : Int32)
       @mantissa = BigInt.new
       @exponent = 0_i64
@@ -36,6 +64,12 @@ module BigNumber
       @precision = precision
     end
 
+    # Creates a `BigFloat` from an integer value.
+    #
+    # ```
+    # BigNumber::BigFloat.new(42)                    # 128-bit precision
+    # BigNumber::BigFloat.new(-7, precision: 256)    # 256-bit precision
+    # ```
     def initialize(value : Int, *, precision : Int32 = @@default_precision)
       @precision = precision
       if value == 0
@@ -50,6 +84,7 @@ module BigNumber
       end
     end
 
+    # Creates a `BigFloat` from a `BigInt` value.
     def initialize(value : BigInt, *, precision : Int32 = @@default_precision)
       @precision = precision
       if value.zero?
@@ -64,6 +99,14 @@ module BigNumber
       end
     end
 
+    # Creates a `BigFloat` from a `Float64`. Decomposes the IEEE 754 representation
+    # exactly, then normalizes to the target precision.
+    #
+    # Raises `ArgumentError` for non-finite floats (NaN, infinity).
+    #
+    # ```
+    # BigNumber::BigFloat.new(0.1) # exact binary approximation of 0.1
+    # ```
     def initialize(value : Float64, *, precision : Int32 = @@default_precision)
       raise ArgumentError.new("Non-finite float") unless value.finite?
       @precision = precision
@@ -93,10 +136,13 @@ module BigNumber
       normalize!
     end
 
+    # Creates a `BigFloat` from a `Float32` by promoting to `Float64`.
     def initialize(value : Float32, *, precision : Int32 = @@default_precision)
       initialize(value.to_f64, precision: precision)
     end
 
+    # Creates a `BigFloat` from a `BigRational` by dividing numerator by denominator
+    # with enough precision for rounding.
     def initialize(value : BigRational, *, precision : Int32 = @@default_precision)
       @precision = precision
       if value.zero?
@@ -128,6 +174,15 @@ module BigNumber
       normalize!
     end
 
+    # Parses a `BigFloat` from a decimal string. Supports optional sign, decimal point,
+    # and scientific notation (e.g. `"1.5e10"`, `"-0.001"`, `"42"`).
+    #
+    # Raises `ArgumentError` for empty strings.
+    #
+    # ```
+    # BigNumber::BigFloat.new("3.14159265358979323846") # parsed at default precision
+    # BigNumber::BigFloat.new("1e-100", precision: 512) # scientific notation
+    # ```
     def initialize(str : String, *, precision : Int32 = @@default_precision)
       @precision = precision
       s = str.strip
@@ -208,6 +263,7 @@ module BigNumber
       end
     end
 
+    # Creates a copy of another `BigFloat`.
     def initialize(other : BigFloat)
       @mantissa = other.mantissa.clone
       @exponent = other.exponent
@@ -215,37 +271,45 @@ module BigNumber
       @precision = other.precision
     end
 
+    # Internal constructor from raw components. Does not normalize.
     protected def initialize(@mantissa : BigInt, @exponent : Int64, @sign : Int8, @precision : Int32)
     end
 
+    # Returns a deep copy.
     def clone : BigFloat
       BigFloat.new(self)
     end
 
     # --- Predicates ---
 
+    # Returns `true` if the value is zero.
     def zero? : Bool
       @sign == 0
     end
 
+    # Returns `true` if the value is strictly positive.
     def positive? : Bool
       @sign > 0
     end
 
+    # Returns `true` if the value is strictly negative.
     def negative? : Bool
       @sign < 0
     end
 
+    # Always returns `false`. `BigFloat` cannot represent NaN.
     @[AlwaysInline]
     def nan? : Bool
       false
     end
 
+    # Always returns `nil`. `BigFloat` cannot represent infinity.
     @[AlwaysInline]
     def infinite? : Int32?
       nil
     end
 
+    # Returns `true` if the value has no fractional part.
     def integer? : Bool
       return true if zero?
       return true if @exponent >= 0
@@ -259,6 +323,7 @@ module BigNumber
 
     # --- Comparison ---
 
+    # Compares `self` with *other* by sign, then by magnitude alignment.
     def <=>(other : BigFloat) : Int32
       # Different signs
       return 0 if @sign == 0 && other.sign == 0
@@ -269,19 +334,23 @@ module BigNumber
       @sign < 0 ? -cmp : cmp
     end
 
+    # :ditto:
     def <=>(other : Int) : Int32
       self <=> BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def <=>(other : BigInt) : Int32
       self <=> BigFloat.new(other, precision: @precision)
     end
 
+    # Compares with a primitive float. Returns `nil` for NaN.
     def <=>(other : Float) : Int32?
       return nil if other.nan?
       self <=> BigFloat.new(other.to_f64, precision: @precision)
     end
 
+    # Returns `true` if `self` and *other* represent the same value.
     def ==(other : BigFloat) : Bool
       return true if @sign == 0 && other.sign == 0
       return false if @sign != other.sign
@@ -289,19 +358,23 @@ module BigNumber
       (self <=> other) == 0
     end
 
+    # :ditto:
     def ==(other : Int) : Bool
       self == BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def ==(other : BigInt) : Bool
       self == BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def ==(other : Float) : Bool
       return false if other.nan?
       self == BigFloat.new(other.to_f64, precision: @precision)
     end
 
+    # Computes a hash for this value.
     def hash(hasher)
       hasher = @sign.hash(hasher)
       hasher = @mantissa.hash(hasher)
@@ -311,11 +384,13 @@ module BigNumber
 
     # --- Unary ---
 
+    # Returns the negation of `self`.
     def - : BigFloat
       return clone if zero?
       BigFloat.new(@mantissa.clone, @exponent, (-@sign).to_i8, @precision)
     end
 
+    # Returns the absolute value.
     def abs : BigFloat
       return clone if zero?
       BigFloat.new(@mantissa.clone, @exponent, 1_i8, @precision)
@@ -323,6 +398,8 @@ module BigNumber
 
     # --- Arithmetic ---
 
+    # Returns the sum of `self` and *other*. The result precision is the
+    # maximum of both operands' precisions.
     def +(other : BigFloat) : BigFloat
       return other.clone if zero?
       return clone if other.zero?
@@ -365,34 +442,42 @@ module BigNumber
       result
     end
 
+    # :ditto:
     def +(other : Int) : BigFloat
       self + BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def +(other : BigInt) : BigFloat
       self + BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def +(other : Float) : BigFloat
       self + BigFloat.new(other.to_f64, precision: @precision)
     end
 
+    # Returns the difference of `self` and *other*.
     def -(other : BigFloat) : BigFloat
       self + (-other)
     end
 
+    # :ditto:
     def -(other : Int) : BigFloat
       self - BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def -(other : BigInt) : BigFloat
       self - BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def -(other : Float) : BigFloat
       self - BigFloat.new(other.to_f64, precision: @precision)
     end
 
+    # Returns the product of `self` and *other*.
     def *(other : BigFloat) : BigFloat
       return BigFloat.new(precision: Math.max(@precision, other.precision)) if zero? || other.zero?
 
@@ -406,18 +491,24 @@ module BigNumber
       result
     end
 
+    # :ditto:
     def *(other : Int) : BigFloat
       self * BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def *(other : BigInt) : BigFloat
       self * BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def *(other : Float) : BigFloat
       self * BigFloat.new(other.to_f64, precision: @precision)
     end
 
+    # Returns the quotient of `self` divided by *other*.
+    #
+    # Raises `DivisionByZeroError` if *other* is zero.
     def /(other : BigFloat) : BigFloat
       raise DivisionByZeroError.new if other.zero?
       return BigFloat.new(precision: Math.max(@precision, other.precision)) if zero?
@@ -438,18 +529,23 @@ module BigNumber
       result
     end
 
+    # :ditto:
     def /(other : Int) : BigFloat
       self / BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def /(other : BigInt) : BigFloat
       self / BigFloat.new(other, precision: @precision)
     end
 
+    # :ditto:
     def /(other : Float) : BigFloat
       self / BigFloat.new(other.to_f64, precision: @precision)
     end
 
+    # Raises `self` to the given integer *exp* using binary exponentiation.
+    # Negative exponents compute the reciprocal.
     def **(exp : Int) : BigFloat
       return BigFloat.new(1, precision: @precision) if exp == 0
       if exp < 0
@@ -471,6 +567,7 @@ module BigNumber
       result
     end
 
+    # Raises `self` to the given `BigInt` *exp* using binary exponentiation.
     def **(exp : BigInt) : BigFloat
       return BigFloat.new(1, precision: @precision) if exp.zero?
       if exp.negative?
@@ -491,6 +588,7 @@ module BigNumber
 
     # --- Rounding ---
 
+    # Rounds toward negative infinity, returning an integer-valued `BigFloat`.
     def floor : BigFloat
       return clone if zero?
 
@@ -530,14 +628,17 @@ module BigNumber
       result
     end
 
+    # Rounds toward positive infinity, returning an integer-valued `BigFloat`.
     def ceil : BigFloat
       -((-self).floor)
     end
 
+    # Rounds toward zero (truncates), returning an integer-valued `BigFloat`.
     def trunc : BigFloat
       negative? ? ceil : floor
     end
 
+    # Rounds to the nearest integer using round-half-to-even (banker's rounding).
     def round : BigFloat
       return clone if zero?
 
@@ -591,6 +692,7 @@ module BigNumber
       result
     end
 
+    # Rounds to the nearest integer, breaking ties away from zero.
     def round_away : BigFloat
       if positive?
         (self + BigFloat.new(0.5, precision: @precision)).floor
@@ -601,6 +703,7 @@ module BigNumber
       end
     end
 
+    # Rounds to the nearest integer, breaking ties to even (banker's rounding).
     def round_even : BigFloat
       return clone if zero?
       if positive?
@@ -623,6 +726,7 @@ module BigNumber
 
     # --- Conversions ---
 
+    # Converts to `Float64`. May lose precision or overflow to infinity.
     def to_f64 : Float64
       return 0.0 if zero?
 
@@ -704,66 +808,81 @@ module BigNumber
       bits.unsafe_as(Float64)
     end
 
+    # Converts to `Float64` (alias for `#to_f64`).
     def to_f : Float64
       to_f64
     end
 
+    # Converts to `Float32`. May lose precision.
     def to_f32 : Float32
       to_f64.to_f32
     end
 
+    # Unchecked conversion to `Float32`.
     def to_f32! : Float32
       to_f64.to_f32!
     end
 
+    # Unchecked conversion to `Float64`.
     def to_f64! : Float64
       to_f64
     end
 
+    # Unchecked conversion to `Float64`.
     def to_f! : Float64
       to_f64
     end
 
+    # Returns the sign as an `Int32` (-1, 0, or 1).
     def sign_i32 : Int32
       @sign.to_i32
     end
 
+    # Truncates to `Int32`.
     def to_i : Int32
       to_i32
     end
 
+    # Unchecked truncation to `Int32`.
     def to_i! : Int32
       to_i32!
     end
 
+    # Truncates to `UInt32`.
     def to_u : UInt32
       to_u32
     end
 
+    # Unchecked truncation to `UInt32`.
     def to_u! : UInt32
       to_u32!
     end
 
     {% for info in [{Int8, "i8"}, {Int16, "i16"}, {Int32, "i32"}, {Int64, "i64"}] %}
+      # Truncates to `{{info[0]}}`.
       def to_{{info[1].id}} : {{info[0]}}
         to_big_i.to_{{info[1].id}}
       end
 
+      # Unchecked truncation to `{{info[0]}}`.
       def to_{{info[1].id}}! : {{info[0]}}
         to_big_i.to_{{info[1].id}}!
       end
     {% end %}
 
     {% for info in [{UInt8, "u8"}, {UInt16, "u16"}, {UInt32, "u32"}, {UInt64, "u64"}] %}
+      # Truncates to `{{info[0]}}`.
       def to_{{info[1].id}} : {{info[0]}}
         to_big_i.to_{{info[1].id}}
       end
 
+      # Unchecked truncation to `{{info[0]}}`.
       def to_{{info[1].id}}! : {{info[0]}}
         to_big_i.to_{{info[1].id}}!
       end
     {% end %}
 
+    # Truncates the value toward zero and returns a `BigInt`.
     def to_big_i : BigInt
       return BigInt.new if zero?
 
@@ -780,6 +899,7 @@ module BigNumber
       @sign < 0 ? -result : result
     end
 
+    # Converts to an exact `BigRational` (mantissa * 2^exponent as a fraction).
     def to_big_r : BigRational
       return BigRational.new(0) if zero?
 
@@ -792,10 +912,18 @@ module BigNumber
       end
     end
 
+    # Returns the decimal string representation with approximately
+    # `precision * log10(2)` significant digits.
+    #
+    # ```
+    # BigNumber::BigFloat.new(3).to_s  # => "3.0"
+    # BigNumber::BigFloat.new(-1, 2).to_s # => "-0.5"
+    # ```
     def to_s : String
       String.build { |io| to_s(io) }
     end
 
+    # Writes the decimal string representation to the given *io*.
     def to_s(io : IO) : Nil
       if zero?
         io << "0.0"
@@ -837,16 +965,20 @@ module BigNumber
       io << stripped
     end
 
+    # :ditto:
     def inspect(io : IO) : Nil
       to_s(io)
     end
 
+    # Returns `self`.
     def to_big_f : BigFloat
       self
     end
 
     # --- Internal ---
 
+    # Normalizes the mantissa to exactly `@precision` bits by shifting left or right,
+    # adjusting the exponent accordingly. Applies round-to-nearest-even when truncating.
     protected def normalize!
       if @mantissa.zero?
         @sign = 0_i8
@@ -869,6 +1001,7 @@ module BigNumber
       # bit_len == @precision: already normalized
     end
 
+    # Rounds the mantissa based on a division remainder using round-to-nearest-even.
     protected def round_using_remainder!(r : BigInt, divisor : BigInt)
       return if r.zero?
 
