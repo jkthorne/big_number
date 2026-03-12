@@ -102,9 +102,9 @@ additional carved-out regions.
 **Result:** 1000-limb mul memory dropped from 336 kB/op to 62 kB/op (82%
 reduction). Speed improved from 5.58x slower to 4.64x slower.
 
-**Still TODO:** Simplify interpolation to use fixed-size buffers instead of
-tracking individual sizes (eliminates the `Math.max(c3n, tn)` guards). This
-is a correctness-hardening change, not a performance change.
+**Deferred:** Simplify interpolation to use fixed-size buffers instead of
+tracking individual sizes. Not worth pursuing since Toom-3 is effectively
+disabled (threshold 10,000) — Karatsuba is uniformly better at practical sizes.
 
 ### 3c. Fix `to_f64` precision for large numbers — DONE
 
