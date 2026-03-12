@@ -633,12 +633,18 @@ module BigNumber
       raise ArgumentError.new("Negative exponent") if exp.negative?
       raise ArgumentError.new("Modulus must be positive") if !mod.positive?
       return BigInt.new if mod.abs_size == 1 && mod.@limbs[0] == 1_u64
-      result = self % mod
       if exp.zero?
         return BigInt.new(1) % mod
       end
-      # Use the exponent's bit_length to iterate without allocating a copy
-      base = result
+
+      # Use Montgomery multiplication for multi-limb odd moduli
+      mn = mod.abs_size
+      if mn >= 2 && (mod.@limbs[0] & 1_u64) == 1_u64
+        return montgomery_pow_mod(exp, mod)
+      end
+
+      # Fallback: standard square-and-multiply
+      base = self % mod
       result = BigInt.new(1)
       bits = exp.bit_length
       i = 0
@@ -650,6 +656,103 @@ module BigNumber
         base = (base * base) % mod if i < bits
       end
       result
+    end
+
+    # Montgomery modular exponentiation for odd moduli.
+    # Uses Montgomery form to replace expensive division with multiply-and-shift.
+    private def montgomery_pow_mod(exp : BigInt, mod : BigInt) : BigInt
+      mn = mod.abs_size
+      m = mod.@limbs
+
+      # Compute m' = -m[0]^(-1) mod 2^64
+      # Uses Newton's method: x_{n+1} = x_n * (2 - m[0] * x_n)
+      m_inv = 1_u64
+      8.times do
+        m_inv = m_inv &* (2_u64 &- m[0] &* m_inv)
+      end
+      m_inv = 0_u64 &- m_inv # negate to get -m^(-1) mod 2^64
+
+      # R = 2^(64*mn). Compute R mod m and R^2 mod m.
+      # R mod m = (1 << (64*mn)) % mod
+      r_mod_m = (BigInt.new(1) << (64 * mn)) % mod
+      # R^2 mod m for converting to Montgomery form
+      r2_mod_m = (r_mod_m * r_mod_m) % mod
+
+      # Convert base to Montgomery form: aR mod m = montgomery_reduce(a * R^2, m, m')
+      base_reduced = (self % mod)
+      base_reduced = base_reduced + mod if base_reduced.negative?
+
+      base_mont = mont_mul(base_reduced, r2_mod_m, mod, m_inv, mn)
+      result_mont = r_mod_m
+
+      bits = exp.bit_length
+      i = bits - 1
+      while i >= 0
+        result_mont = mont_mul(result_mont, result_mont, mod, m_inv, mn)
+        if exp.bit(i) == 1
+          result_mont = mont_mul(result_mont, base_mont, mod, m_inv, mn)
+        end
+        i -= 1
+      end
+
+      # Convert back from Montgomery form: result = REDC(result_mont)
+      mont_reduce(result_mont, mod, m_inv, mn)
+    end
+
+    # Montgomery multiplication: compute (a * b * R^-1) mod m
+    private def mont_mul(a : BigInt, b : BigInt, mod : BigInt, m_inv : UInt64, mn : Int32) : BigInt
+      # Product t = a * b (up to 2*mn limbs)
+      t = a * b
+      mont_reduce(t, mod, m_inv, mn)
+    end
+
+    # Montgomery reduction (REDC): compute t * R^-1 mod m
+    private def mont_reduce(t : BigInt, mod : BigInt, m_inv : UInt64, mn : Int32) : BigInt
+      # Work on a mutable copy with enough space
+      tn = mn * 2 + 2
+      tp = Pointer(Limb).malloc(tn)
+      ta = t.abs_size
+      tp.copy_from(t.@limbs, ta)
+
+      m = mod.@limbs
+      i = 0
+      while i < mn
+        # u = t[i] * m' mod 2^64
+        u = tp[i] &* m_inv
+        # t += u * m * 2^(64*i)
+        carry = BigInt.limbs_addmul_1(tp + i, m, mn, u)
+        # Propagate carry
+        j = i + mn
+        while carry > 0 && j < tn
+          sum = tp[j].to_u128 &+ carry.to_u128
+          tp[j] = sum.to_u64!
+          carry = (sum >> 64).to_u64!
+          j += 1
+        end
+        i += 1
+      end
+
+      # Result = t >> (64*mn), i.e., tp[mn..2*mn-1]
+      rn = tn - mn
+      while rn > 0 && tp[mn + rn - 1] == 0
+        rn -= 1
+      end
+      if rn == 0
+        return BigInt.new
+      end
+      result = BigInt.new(capacity: rn)
+      result.@limbs.copy_from(tp + mn, rn)
+      result.set_size(rn)
+
+      # Final subtraction if result >= mod
+      if BigInt.limbs_cmp(result.@limbs, result.abs_size, mod.@limbs, mn) >= 0
+        result = result - mod
+      end
+      result
+    end
+
+    def pow_mod(exp : Int, mod : BigInt) : BigInt
+      pow_mod(BigInt.new(exp), mod)
     end
 
     def pow_mod(exp : Int, mod : BigInt) : BigInt
