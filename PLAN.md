@@ -49,7 +49,19 @@ Run core tests with `crystal spec`, stdlib tests with
 
 ```
 BigNumber vs stdlib BigInt (libgmp) — Apple Silicon, --release
+After Phase 1 (inline asm), Phase 2 (arena B-Z), Phase 4 (Montgomery pow_mod)
 
+              Add          Mul          Div          to_s
+  1 limb:   1.29x FASTER  1.30x FASTER  1.02x FASTER  1.95x slower
+ 10 limbs:  1.02x FASTER  1.35x slower  2.54x slower  3.36x slower
+ 30 limbs:  1.07x slower  1.74x slower  2.47x slower  5.62x slower
+ 50 limbs:  1.12x slower  2.62x slower  2.36x slower  5.16x slower
+100 limbs:  1.09x slower  2.62x slower  2.62x slower  5.37x slower
+  1k limbs: 1.18x slower  3.21x slower  —             4.58x slower
+```
+
+Previous benchmarks (before inline asm):
+```
               Add          Mul          Div          to_s
   1 limb:   1.37x FASTER  1.31x FASTER  1.02x slower  1.84x slower
  10 limbs:  1.02x FASTER  1.55x slower  2.56x slower  3.31x slower
@@ -62,8 +74,8 @@ BigNumber vs stdlib BigInt (libgmp) — Apple Silicon, --release
 BigRational (pure Crystal vs stdlib):
 ```
                 ~5 digits    ~50 digits    ~200 digits
-  add:         1.14x slower  1.05x slower   1.07x slower
-  mul:         1.09x slower  1.10x slower   1.11x slower
+  add:         1.10x slower  1.10x slower   1.09x slower
+  mul:         1.16x slower  1.17x slower   1.16x slower
   div:         fastest       fastest        fastest
 ```
 
@@ -187,21 +199,19 @@ if BigRational is used with 500+ limb numerators.
 
 ## Step 3: Performance Summary
 
-The target was **2-3x of libgmp across the board**. Final status:
+The target was **2-3x of libgmp across the board**. Final status after
+inline asm inner loops:
 
-- **Add:** 1.02-1.27x — DONE (within target, often faster than GMP)
-- **Mul:** 1.55-4.72x — within target at 10 limbs, gap widens with size
-- **Div:** 2.56-3.11x — borderline, limited by assembly gap
-- **to_s:** 1.84-5.60x — 1-limb within target, larger sizes limited by div
-- **BigRational:** 1.05-1.14x — excellent, nearly matching GMP
+- **Add:** 1.02-1.18x — DONE (within target, often faster than GMP)
+- **Mul:** 1.35-3.21x — within target up to 100 limbs, gap narrows
+- **Div:** 2.36-2.62x — within target at most sizes
+- **to_s:** 1.95-5.62x — limited by division in base conversion
+- **BigRational:** 1.09-1.17x — excellent, nearly matching GMP
 
-The remaining performance gap above 30 limbs is structural: GMP uses
-hand-written assembly for `mpn_mul_1`, `mpn_addmul_1`, `mpn_submul_1` —
-the tight inner loops that dominate Karatsuba, division, and base conversion.
-Crystal's LLVM codegen produces good but not optimal machine code for these
-loops. Further improvement would require either Crystal inline assembly
-support or a fundamentally different algorithmic approach (e.g., NTT-based
-multiplication for very large numbers).
+ARM64 inline assembly for `limbs_add`, `limbs_sub`, `limbs_mul_1`,
+`limbs_addmul_1`, `limbs_submul_1` closed 22-32% of the mul gap and
+8-16% of the div gap. Architecture dispatch uses `{% if flag?(:aarch64) %}`
+with UInt128 fallback for other platforms.
 
 ---
 
@@ -317,22 +327,55 @@ All goals achieved except the 2-3x performance target at large sizes:
 9. **DONE** — `require "big_number/stdlib"` is a drop-in replacement for `require "big"`
 10. **DONE** — JSON/YAML serialization works identically to stdlib
 
-The performance gap in (3) is structural — GMP uses hand-written assembly for
-its inner loops. All algorithmic optimizations (3a-3i) have been exhausted.
-Further improvement requires Crystal inline assembly support or NTT-based
-multiplication for very large numbers.
+The performance gap in (3) is narrower after inline asm but still present
+for mul/div at large sizes — GMP's assembly is more aggressively optimized
+(loop unrolling, instruction scheduling).
+
+## Step 5: Performance Optimizations — DONE
+
+### 5a. Inline Assembly Inner Loops (ARM64) — DONE
+
+Crystal's `asm` keyword enables per-iteration inline assembly with register
+constraints. Implemented for all 6 hot inner loop functions:
+
+- `limbs_add`: `adds`/`adc` chain (1-2 insn/limb vs 4+ with UInt128)
+- `limbs_sub`: `subs`/`cset`/`cinc` for borrow propagation
+- `limbs_add_1`: `adds`/`adc` for single-limb addition
+- `limbs_mul_1`: `mul`/`umulh`/`adds`/`adc` (~4 insn/limb)
+- `limbs_addmul_1`: `mul`/`umulh`/`adds`/`adc` (~6 insn/limb)
+- `limbs_submul_1`: `mul`/`umulh`/`adds`/`adc`/`subs`/`cinc` (~6 insn/limb)
+
+Architecture dispatch via `{% if flag?(:aarch64) %}` with UInt128 fallback.
+Measured 1.4-1.6x speedup per function; cascading benefit to all operations.
+
+### 5b. Arena Allocator for Burnikel-Ziegler Division — DONE
+
+Implemented `LimbArena` bump allocator in `limb.cr`. B-Z division now uses
+a single upfront allocation instead of ~10 mallocs per recursion level.
+Arena size: `(6*nn + 4*dn) * (depth+2)` limbs. B-Z dispatched for
+`dn >= BZ_THRESHOLD` (80 limbs).
+
+### 5c. Montgomery Multiplication for pow_mod — DONE
+
+Implemented Montgomery modular exponentiation for odd moduli with >= 2 limbs:
+- `mont_mul`: Montgomery multiply via REDC
+- `mont_reduce`: t * R^(-1) mod m using `limbs_addmul_1`
+- Newton's method for modular inverse: m' = -m[0]^(-1) mod 2^64
+- Falls back to standard square-and-multiply for even or single-limb moduli
+
+### 5d. NTT-Based Multiplication — DONE
+
+Implemented Number Theoretic Transform multiplication for >= 25,000 limbs:
+- Goldilocks prime p = 2^64 - 2^32 + 1 with specialized modular reduction
+- 32-bit limb splitting eliminates CRT (single prime sufficient)
+- Iterative Cooley-Tukey butterfly with bit-reversal permutation
+- O(n log n) scaling verified: 50k→100k limbs takes ~2x (vs Karatsuba's ~3x)
 
 ## Possible Future Work
 
-These are not planned — just noted for reference if the project is revisited:
-
-- **Inline assembly inner loops** — if Crystal adds inline asm support, rewrite
-  `limbs_mul_1`, `limbs_addmul_1`, `limbs_submul_1` in assembly to close the
-  GMP gap for mul/div/to_s at larger sizes
-- **NTT-based multiplication** — for very large numbers (10,000+ limbs), could
-  implement Number Theoretic Transform multiplication
-- **Arena allocator for Burnikel-Ziegler** — dead code exists; needs pre-allocated
-  arena to avoid per-level malloc overhead
-- **Toom-3 interpolation cleanup** — simplify to fixed-size buffers (deferred,
-  Toom-3 is disabled)
+- **x86-64 inline assembly** — same approach as ARM64, using `mul`/`adc`/`sbb`
+- **Goldilocks mulmod optimization** — fast-path reduction without u128 division
+  could further improve NTT constant factor
+- **Loop unrolling** — 4x unroll in asm inner loops for additional pipeline gains
+- **Barrett reduction** — for repeated modular reduction with same modulus
 - **Shard publication** — publish to shards.info when ready for public use

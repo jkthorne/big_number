@@ -33,18 +33,26 @@ redefines `::BigDecimal` and can't coexist with `require "big"` in the same comp
 | Algorithm | Operation | Threshold |
 |-----------|-----------|-----------|
 | Schoolbook | Multiplication | < 48 limbs |
-| Karatsuba | Multiplication | >= 48 limbs |
-| Toom-Cook 3-way | Multiplication | disabled (threshold 10,000) |
-| Knuth Algorithm D | Division | All sizes |
+| Karatsuba | Multiplication | 48–24,999 limbs |
+| NTT (Goldilocks prime) | Multiplication | >= 25,000 limbs |
+| Knuth Algorithm D | Division | < 80 limbs |
+| Burnikel-Ziegler | Division | >= 80 limbs |
 | Divide-and-conquer | Base conversion (to_s) | > 50 limbs |
 | Binary GCD (Stein's) | GCD | All sizes |
 | Newton's method | sqrt, root(n) | All sizes |
+| Montgomery REDC | pow_mod (odd moduli) | >= 2 limbs |
 | Miller-Rabin | Primality testing | Deterministic to 3.3e24 |
+
+### Platform-Specific Optimizations
+
+ARM64 inline assembly (`{% if flag?(:aarch64) %}`) for inner loops:
+`limbs_add`, `limbs_sub`, `limbs_mul_1`, `limbs_addmul_1`, `limbs_submul_1`.
+UInt128-based fallback for other architectures.
 
 ### Source Layout
 
 - `src/big_number.cr` — Main require file + VERSION constant
-- `src/big_number/limb.cr` — Type aliases (`Limb = UInt64`, `SignedLimb = Int64`)
+- `src/big_number/limb.cr` — Type aliases (`Limb = UInt64`, `SignedLimb = Int64`) + `LimbArena` bump allocator
 - `src/big_number/big_int.cr` — Core BigInt (~2860 lines)
 - `src/big_number/big_rational.cr` — Rational arithmetic
 - `src/big_number/big_float.cr` — Floating point
