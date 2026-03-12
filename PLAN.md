@@ -25,20 +25,19 @@ source code.
 
 ## Current Status — COMPLETE
 
-All four steps are done. The library is feature-complete and stable.
+All five steps are done. The library is feature-complete and optimized.
 
 All four types (BigInt, BigRational, BigFloat, BigDecimal) exist, are correct
 (fuzz-tested against libgmp), and have full API coverage. Stdlib integration is
 complete — `require "big_number/stdlib"` is a drop-in replacement for
-`require "big"` with zero C dependencies. ~7,000 lines of implementation,
+`require "big"` with zero C dependencies. ~7,500 lines of implementation,
 740 tests, all passing.
 
-Performance optimization items 3a-3i are resolved (done or investigated and
-closed). The remaining gap to libgmp is structural: GMP's hand-tuned assembly
-inner loops vs Crystal's LLVM codegen. Further gains require either Crystal
-inline assembly support or algorithmic breakthroughs (e.g., NTT-based
-multiplication) at sizes where our current algorithms are already
-asymptotically correct.
+Performance optimization items 3a-3i plus Step 5 (ARM64 inline asm,
+arena-based Burnikel-Ziegler, Montgomery pow_mod, NTT multiplication) are all
+resolved. The remaining gap to libgmp is GMP's hand-written assembly with
+loop unrolling and instruction scheduling — further improvement requires
+x86-64 inline asm or deeper loop optimizations.
 
 Stdlib wrapper specs are guarded behind `-D big_number_stdlib` compile flag
 since the wrapper redefines `::BigDecimal` (incompatible with `require "big"`).
@@ -155,15 +154,14 @@ Extensive benchmarking across sizes 20-1000 limbs found:
 Negligible change at 1000 limbs (4.64x→4.72x). The remaining gap is GMP's
 hand-tuned assembly inner loops.
 
-### 3g. Burnikel-Ziegler division — INVESTIGATED, NOT VIABLE
+### 3g. Burnikel-Ziegler division — INVESTIGATED, LATER RESOLVED
 
-Implemented full Burnikel-Ziegler (div_2n_by_n, div_3n_by_2n) but per-level
-malloc overhead negated the algorithmic advantage at sizes up to 1000 limbs.
-Would need a pre-allocated arena allocator to be competitive. Reverted dispatch;
-dead code retained for future work with arena allocation.
+Initially implemented full Burnikel-Ziegler (div_2n_by_n, div_3n_by_2n) but
+per-level malloc overhead negated the algorithmic advantage at sizes up to
+1000 limbs. Reverted dispatch; dead code retained.
 
-**Result:** No improvement. Division bottleneck is Algorithm D's inner loop
-(`limbs_submul_1`) which GMP implements in assembly.
+**Later resolved in Step 5b** with `LimbArena` bump allocator — single upfront
+allocation eliminates per-level malloc. B-Z now dispatched for `dn >= 80` limbs.
 
 ### 3h. Reduce `to_s` D&C overhead — DONE
 
@@ -261,8 +259,8 @@ big_number/
 ├── src/
 │   ├── big_number.cr              # require + version
 │   └── big_number/
-│       ├── limb.cr                # type aliases
-│       ├── big_int.cr             # BigInt (2862 lines)
+│       ├── limb.cr                # type aliases + LimbArena (31 lines)
+│       ├── big_int.cr             # BigInt (3249 lines)
 │       ├── big_float.cr           # BigFloat (945 lines)
 │       ├── big_rational.cr        # BigRational (474 lines)
 │       ├── big_decimal.cr         # BigDecimal (592 lines, ported from stdlib)
@@ -284,7 +282,7 @@ big_number/
     └── sanity.cr                  # continuous benchmark vs stdlib
 ```
 
-Total: ~7,000 lines of implementation, 740 tests.
+Total: ~7,500 lines of implementation, 740 tests.
 
 ---
 
@@ -317,8 +315,8 @@ All goals achieved except the 2-3x performance target at large sizes:
 
 1. **DONE** — `BigNumber::BigInt` is a drop-in replacement for `::BigInt`
 2. **DONE** — Zero C dependencies — `crystal build` with no system libraries
-3. **PARTIAL** — Within 2-3x for add (all sizes) and BigRational; mul/div/to_s
-   exceed 3x above 30 limbs due to GMP's assembly inner loops
+3. **IMPROVED** — Within 2-3x for add, mul (to 100 limbs), div; to_s still
+   exceeds 3x above 30 limbs (limited by division in base conversion)
 4. **DONE** — Faster than libgmp for single-limb add and mul (no FFI overhead)
 5. **DONE** — Fuzz-tested against libgmp with millions of random inputs
 6. **DONE** — `BigNumber::BigRational` works for exact rational arithmetic
