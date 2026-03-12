@@ -301,21 +301,38 @@ Additional targeted tests:
 
 ---
 
-## What Done Looks Like
+## What Done Looks Like — Final Status
 
-1. `BigNumber::BigInt` is a drop-in replacement for `::BigInt` in Crystal programs
-2. Zero C dependencies — `crystal build` with no system libraries
-3. Within 2-3x of libgmp performance for numbers up to ~1000 limbs
-4. Faster than libgmp for single-limb operations (no FFI overhead)
-5. Fuzz-tested against libgmp with millions of random inputs
-6. `BigNumber::BigRational` works for exact rational arithmetic
-7. `BigNumber::BigFloat` works for arbitrary-precision floating point
-8. `BigNumber::BigDecimal` works for fixed-scale decimal arithmetic
-9. `require "big_number/stdlib"` is a drop-in replacement for `require "big"`
-10. JSON/YAML serialization works identically to stdlib
+All goals achieved except the 2-3x performance target at large sizes:
 
-We have (1), (2), (4) for add/mul at 1 limb, (5), (6), (7), (8), (9),
-and (10). Item (3) is partially met: add and BigRational are within target,
-mul/div/to_s exceed 3x above 30 limbs due to GMP's assembly inner loops.
-All algorithmic optimizations (3a-3h) have been applied; further improvement
-requires inline assembly or NTT-based multiplication.
+1. **DONE** — `BigNumber::BigInt` is a drop-in replacement for `::BigInt`
+2. **DONE** — Zero C dependencies — `crystal build` with no system libraries
+3. **PARTIAL** — Within 2-3x for add (all sizes) and BigRational; mul/div/to_s
+   exceed 3x above 30 limbs due to GMP's assembly inner loops
+4. **DONE** — Faster than libgmp for single-limb add and mul (no FFI overhead)
+5. **DONE** — Fuzz-tested against libgmp with millions of random inputs
+6. **DONE** — `BigNumber::BigRational` works for exact rational arithmetic
+7. **DONE** — `BigNumber::BigFloat` works for arbitrary-precision floating point
+8. **DONE** — `BigNumber::BigDecimal` works for fixed-scale decimal arithmetic
+9. **DONE** — `require "big_number/stdlib"` is a drop-in replacement for `require "big"`
+10. **DONE** — JSON/YAML serialization works identically to stdlib
+
+The performance gap in (3) is structural — GMP uses hand-written assembly for
+its inner loops. All algorithmic optimizations (3a-3i) have been exhausted.
+Further improvement requires Crystal inline assembly support or NTT-based
+multiplication for very large numbers.
+
+## Possible Future Work
+
+These are not planned — just noted for reference if the project is revisited:
+
+- **Inline assembly inner loops** — if Crystal adds inline asm support, rewrite
+  `limbs_mul_1`, `limbs_addmul_1`, `limbs_submul_1` in assembly to close the
+  GMP gap for mul/div/to_s at larger sizes
+- **NTT-based multiplication** — for very large numbers (10,000+ limbs), could
+  implement Number Theoretic Transform multiplication
+- **Arena allocator for Burnikel-Ziegler** — dead code exists; needs pre-allocated
+  arena to avoid per-level malloc overhead
+- **Toom-3 interpolation cleanup** — simplify to fixed-size buffers (deferred,
+  Toom-3 is disabled)
+- **Shard publication** — publish to shards.info when ready for public use
