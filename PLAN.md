@@ -23,17 +23,22 @@ source code.
 
 ---
 
-## Current Status
+## Current Status — COMPLETE
 
-Steps 1-3 and Step 4 are done. All four types (BigInt, BigRational,
-BigFloat, BigDecimal) exist, are correct (fuzz-tested against libgmp), and have
-full API coverage. Stdlib integration is complete — `require "big_number/stdlib"`
-is a drop-in replacement for `require "big"` with zero C dependencies.
+All four steps are done. The library is feature-complete and stable.
 
-Performance optimization items 3a-3h are complete. The remaining gap to libgmp
-is dominated by GMP's hand-tuned assembly inner loops vs Crystal's LLVM codegen
-— further gains require either inline assembly or algorithmic breakthroughs at
-sizes where our current algorithms are already asymptotically correct.
+All four types (BigInt, BigRational, BigFloat, BigDecimal) exist, are correct
+(fuzz-tested against libgmp), and have full API coverage. Stdlib integration is
+complete — `require "big_number/stdlib"` is a drop-in replacement for
+`require "big"` with zero C dependencies. ~7,000 lines of implementation,
+740 tests, all passing.
+
+Performance optimization items 3a-3i are resolved (done or investigated and
+closed). The remaining gap to libgmp is structural: GMP's hand-tuned assembly
+inner loops vs Crystal's LLVM codegen. Further gains require either Crystal
+inline assembly support or algorithmic breakthroughs (e.g., NTT-based
+multiplication) at sizes where our current algorithms are already
+asymptotically correct.
 
 Stdlib wrapper specs are guarded behind `-D big_number_stdlib` compile flag
 since the wrapper redefines `::BigDecimal` (incompatible with `require "big"`).
