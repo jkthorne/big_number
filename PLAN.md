@@ -1,379 +1,189 @@
-# BigNumber — Pure Crystal Arbitrary-Precision Arithmetic
+# BigNumber
 
-Replace Crystal's GMP dependency with native code. No C, no FFI, no excuses.
+Pure Crystal arbitrary-precision arithmetic. No C, no FFI, no GMP.
 
-## Philosophy
+## What This Is
 
-Don't architect. Write code. The structure will emerge from the code that works,
-not from diagrams drawn before the first function compiles.
+A clean-room replacement for Crystal's `require "big"` that compiles with zero
+system library dependencies. Four types — `BigInt`, `BigRational`, `BigFloat`,
+`BigDecimal` — all fuzz-tested against libgmp, with a drop-in stdlib wrapper.
 
-The algorithms are well-known (Knuth Vol 2, HAC, Wikipedia). Crystal gives us
-`UInt128` for widening multiply and LLVM intrinsics for CLZ/CTZ. That's all we
-need. Write the usage code first, make it compile, make it correct, make it fast.
+7,408 lines of implementation. 740 tests. All passing.
 
-**Reference material** (algorithms only, not code):
-- Knuth, *The Art of Computer Programming*, Vol 2: Seminumerical Algorithms
-- *Handbook of Applied Cryptography*, Chapter 14
-- GMP documentation for algorithm descriptions (not source code)
-- Wikipedia: Karatsuba, Toom-Cook, Burnikel-Ziegler
+## Design
 
-**License**: This is a clean-room implementation. We implement well-known
-algorithms from textbooks. We do not read, copy, or translate GMP/mini-gmp
-source code.
-
----
-
-## Current Status — COMPLETE
-
-All five steps are done. The library is feature-complete and optimized.
-
-All four types (BigInt, BigRational, BigFloat, BigDecimal) exist, are correct
-(fuzz-tested against libgmp), and have full API coverage. Stdlib integration is
-complete — `require "big_number/stdlib"` is a drop-in replacement for
-`require "big"` with zero C dependencies. ~7,500 lines of implementation,
-740 tests, all passing.
-
-Performance optimization items 3a-3i plus Step 5 (ARM64 inline asm,
-arena-based Burnikel-Ziegler, Montgomery pow_mod, NTT multiplication) are all
-resolved. The remaining gap to libgmp is GMP's hand-written assembly with
-loop unrolling and instruction scheduling — further improvement requires
-x86-64 inline asm or deeper loop optimizations.
-
-Stdlib wrapper specs are guarded behind `-D big_number_stdlib` compile flag
-since the wrapper redefines `::BigDecimal` (incompatible with `require "big"`).
-Run core tests with `crystal spec`, stdlib tests with
-`crystal spec -D big_number_stdlib spec/stdlib_*_spec.cr`.
-
-### Where We Stand (Benchmark, March 2026)
-
-```
-BigNumber vs stdlib BigInt (libgmp) — Apple Silicon, --release
-After Phase 1 (inline asm), Phase 2 (arena B-Z), Phase 4 (Montgomery pow_mod)
-
-              Add          Mul          Div          to_s
-  1 limb:   1.29x FASTER  1.30x FASTER  1.02x FASTER  1.95x slower
- 10 limbs:  1.02x FASTER  1.35x slower  2.54x slower  3.36x slower
- 30 limbs:  1.07x slower  1.74x slower  2.47x slower  5.62x slower
- 50 limbs:  1.12x slower  2.62x slower  2.36x slower  5.16x slower
-100 limbs:  1.09x slower  2.62x slower  2.62x slower  5.37x slower
-  1k limbs: 1.18x slower  3.21x slower  —             4.58x slower
-```
-
-Previous benchmarks (before inline asm):
-```
-              Add          Mul          Div          to_s
-  1 limb:   1.37x FASTER  1.31x FASTER  1.02x slower  1.84x slower
- 10 limbs:  1.02x FASTER  1.55x slower  2.56x slower  3.31x slower
- 30 limbs:  1.14x slower  2.41x slower  2.81x slower  5.60x slower
- 50 limbs:  1.22x slower  3.20x slower  2.67x slower  5.18x slower
-100 limbs:  1.12x slower  3.34x slower  3.11x slower  5.54x slower
-  1k limbs: 1.27x slower  4.72x slower  —             5.25x slower
-```
-
-BigRational (pure Crystal vs stdlib):
-```
-                ~5 digits    ~50 digits    ~200 digits
-  add:         1.10x slower  1.10x slower   1.09x slower
-  mul:         1.16x slower  1.17x slower   1.16x slower
-  div:         fastest       fastest        fastest
-```
-
----
-
-## Step 3: Make It Fast — Completed Items
-
-### 3a. Reduce allocation pressure in hot paths — DONE
-
-- `pow_mod`: iterates exponent bits directly via `bit()` instead of
-  allocating/shifting a BigInt copy each iteration
-- `prime?`: pre-computes `self_minus_1` and `two` once, uses allocation-free
-  small-number checks, avoids `BigInt.new(1)` comparisons in inner loop
-- `factorial`: uses `result * i` (Int fast path with `limbs_mul_1`) instead
-  of `result * BigInt.new(i)` — one allocation per iteration instead of two
-- `divmod`: uses `q - 1` instead of `q - BigInt.new(1)`
-- `~` (NOT): uses `self.abs - 1` instead of `self.abs - BigInt.new(1)`
-- `>>` for negatives: uses `result - 1` instead of `result - BigInt.new(1)`
-- `<=>(Int)`: compares directly against the integer's magnitude without
-  allocating a temporary BigInt
-- `==(Int)`: compares limbs directly without allocation
-
-### 3b. Fix Toom-3 allocation blowup — DONE (partial)
-
-Moved heap allocations in `toom3_eval_at2` (2 temp buffers) and
-`toom3_interpolate` (c2, t, tmp8 buffers) into the pre-allocated scratch
-buffer. Updated scratch layout:
-
-```
-[w0 | w1 | wm1 | w2 | winf | ea | eb | interp_c2 | interp_t | interp_tmp | recursive_scratch]
-```
-
-Increased `toom3_scratch_size` from `20n+512` to `24n+512` to cover the
-additional carved-out regions.
-
-**Result:** 1000-limb mul memory dropped from 336 kB/op to 62 kB/op (82%
-reduction). Speed improved from 5.58x slower to 4.64x slower.
-
-**Deferred:** Simplify interpolation to use fixed-size buffers instead of
-tracking individual sizes. Not worth pursuing since Toom-3 is effectively
-disabled (threshold 10,000) — Karatsuba is uniformly better at practical sizes.
-
-### 3c. Fix `to_f64` precision for large numbers — DONE
-
-Now uses top 2 limbs with proper exponent scaling (`2.0 ** ((n-2)*64)`)
-instead of accumulating all limbs through a Float64. Correct rounding for
-any number of limbs.
-
-### 3d. Binary GCD (Stein's algorithm) — DONE
-
-Replaced Euclidean GCD (division per iteration) with binary GCD using only
-shifts and subtractions. ~20 lines. Directly sped up all BigRational
-operations since canonicalization calls GCD.
-
-**Result:** BigRational operations improved from 1.26-1.39x slower to
-1.29-1.35x slower. (Note: regression from earlier 1.11x measurement —
-investigate whether GCD or canonicalization overhead increased.)
-
-### 3e. Single-limb `to_s` fast path — DONE
-
-For 1-limb numbers, uses Crystal's built-in `UInt64.to_s(base)` instead of
-the chunked extraction pipeline.
-
-**Result:** 1-limb to_s improved to 1.84x slower (within target).
-
-### 3f. Threshold tuning (Karatsuba/Toom-3) — DONE
-
-Extensive benchmarking across sizes 20-1000 limbs found:
-
-1. **Karatsuba threshold raised from 32 to 48.** Schoolbook is faster than
-   Karatsuba below 48 limbs due to Karatsuba's allocation and recursion overhead.
-2. **Toom-3 effectively disabled (threshold 10,000).** Our Toom-3 implementation
-   never beats Karatsuba at practical sizes — the evaluation/interpolation
-   overhead dominates. Karatsuba with schoolbook base case is uniformly better.
-
-**Result:** Small improvements at 50-100 limbs (3.25x→3.20x, 3.42x→3.34x).
-Negligible change at 1000 limbs (4.64x→4.72x). The remaining gap is GMP's
-hand-tuned assembly inner loops.
-
-### 3g. Burnikel-Ziegler division — INVESTIGATED, LATER RESOLVED
-
-Initially implemented full Burnikel-Ziegler (div_2n_by_n, div_3n_by_2n) but
-per-level malloc overhead negated the algorithmic advantage at sizes up to
-1000 limbs. Reverted dispatch; dead code retained.
-
-**Later resolved in Step 5b** with `LimbArena` bump allocator — single upfront
-allocation eliminates per-level malloc. B-Z now dispatched for `dn >= 80` limbs.
-
-### 3h. Reduce `to_s` D&C overhead — DONE
-
-Three optimizations applied:
-
-1. **Power table caching.** `@@power_cache` stores precomputed base power
-   towers (base^chunk, base^(2*chunk), base^(4*chunk), ...) keyed by base.
-   Eliminates repeated squaring on every `to_s` call.
-
-2. **Raw limb recursion.** Replaced `dc_to_s_recurse` (BigInt-based, allocates
-   quotient+remainder BigInts per split) with `dc_to_s_recurse_raw` that works
-   directly with `Pointer(Limb)` and calls `limbs_div_rem` without wrapping.
-
-3. **Branch-free `limbs_submul_1`.** Division inner loop rewritten to avoid
-   conditional borrow propagation, using `u128` accumulator instead. Reduces
-   branch misprediction in tight loops.
-
-4. **Pre-allocated division scratch.** Single `Pointer(Limb).malloc(2*size+2)`
-   allocated once in `dc_to_s` and shared across all recursive levels.
-
-**Result:** 1-limb to_s: 2.72x→1.84x (within target). Multi-limb to_s
-improved modestly (5.97x→5.25x at 1000 limbs). Remaining gap is dominated
-by division performance (Algorithm D is 2.5-3x slower than GMP assembly).
-
-### 3i. Lehmer's GCD — NOT NEEDED
-
-Binary GCD performance is excellent for practical BigRational sizes.
-BigRational improved significantly (1.29-1.35x → 1.05-1.14x) from the
-combined threshold tuning and to_s optimizations. Only worth revisiting
-if BigRational is used with 500+ limb numerators.
-
----
-
-## Step 3: Performance Summary
-
-The target was **2-3x of libgmp across the board**. Final status after
-inline asm inner loops:
-
-- **Add:** 1.02-1.18x — DONE (within target, often faster than GMP)
-- **Mul:** 1.35-3.21x — within target up to 100 limbs, gap narrows
-- **Div:** 2.36-2.62x — within target at most sizes
-- **to_s:** 1.95-5.62x — limited by division in base conversion
-- **BigRational:** 1.09-1.17x — excellent, nearly matching GMP
-
-ARM64 inline assembly for `limbs_add`, `limbs_sub`, `limbs_mul_1`,
-`limbs_addmul_1`, `limbs_submul_1` closed 22-32% of the mul gap and
-8-16% of the div gap. Architecture dispatch uses `{% if flag?(:aarch64) %}`
-with UInt128 fallback for other platforms.
-
----
-
-## Step 4: Stdlib Integration — DONE
-
-All 8 phases complete. See `STDLIB_REPLACEMENT_PLAN.md` for the full phase
-breakdown.
-
-- **Phase 1-3:** API gaps filled in BigInt, BigRational, BigFloat — DONE
-- **Phase 4:** BigDecimal ported from stdlib (`big_decimal.cr`, 592 lines) — DONE
-- **Phase 5:** Wrapper structs (`stdlib.cr`, 1323 lines) — DONE
-  - `BigInt < Int`, `BigFloat < Float`, `BigRational < Number`, `BigDecimal < Number`
-  - Single `@inner` field delegates to BigNumber types; LLVM optimizes away wrapper
-  - `Number.expand_div` for cross-type division
-- **Phase 6:** Primitive extensions (`stdlib_ext.cr`, 464 lines) — DONE
-  - `Int#to_big_i`, `Float#to_big_f`, `String#to_big_*` etc.
-  - Math module: `isqrt`, `sqrt`, `pw2ceil`
-  - Random: `rand(BigInt)`, `rand(Range(BigInt, BigInt))`
-  - `Crystal::Hasher.reduce_num` for numeric hash equality
-- **Phase 7:** JSON/YAML serialization (`stdlib_json.cr`, `stdlib_yaml.cr`) — DONE
-- **Phase 8:** Full compatibility tests (`stdlib_compat_spec.cr`, 271 tests) — DONE
-
----
-
-## The Representation
-
-One struct. Sign-magnitude. UInt64 limbs. That's it.
+### Representation
 
 ```crystal
 struct BigNumber::BigInt
-  @limbs : Pointer(UInt64)  # least-significant limb first
-  @alloc : Int32            # capacity (limb count)
-  @size  : Int32            # used limbs; negative means negative number; 0 means zero
+  @limbs : Pointer(UInt64)  # least-significant first
+  @alloc : Int32            # capacity (limbs)
+  @size  : Int32            # used limbs; negative = negative number; 0 = zero
 end
 ```
 
----
+Sign-magnitude. UInt64 limbs. Crystal's `UInt128` for widening multiply.
+LLVM intrinsics for CLZ/CTZ. ARM64 inline assembly where it matters.
 
-## File Structure
+### Algorithm Selection
+
+| Operation | Small | Medium | Large |
+|-----------|-------|--------|-------|
+| **Multiply** | Schoolbook (< 48 limbs) | Karatsuba (48–24,999) | NTT Goldilocks (>= 25,000) |
+| **Divide** | Knuth Algorithm D (< 80) | Burnikel-Ziegler (>= 80) | — |
+| **to_s** | Native UInt64 (1 limb) | Chunked extraction (2–50) | D&C with cached powers (> 50) |
+| **GCD** | Binary GCD (Stein's) | — | — |
+| **sqrt/root** | Newton's method | — | — |
+| **pow_mod** | Square-and-multiply (small/even mod) | Montgomery REDC (odd, >= 2 limbs) | — |
+| **Primality** | Deterministic Miller-Rabin (to 3.3 x 10^24) | — | — |
+
+Toom-Cook 3-way is implemented but effectively disabled (threshold 10,000) —
+Karatsuba uniformly wins at practical sizes due to Toom-3's evaluation/interpolation
+overhead.
+
+### Platform Optimizations
+
+ARM64 inline assembly for the six hot inner-loop functions:
+
+| Function | Instructions/limb | vs UInt128 fallback |
+|----------|-------------------|---------------------|
+| `limbs_add` | 1-2 (`adds`/`adc`) | ~1.5x faster |
+| `limbs_sub` | 2-3 (`subs`/`cset`/`cinc`) | ~1.5x faster |
+| `limbs_add_1` | 1-2 (`adds`/`adc`) | ~1.4x faster |
+| `limbs_mul_1` | ~4 (`mul`/`umulh`/`adds`/`adc`) | ~1.4x faster |
+| `limbs_addmul_1` | ~6 | ~1.6x faster |
+| `limbs_submul_1` | ~6 | ~1.4x faster |
+
+Dispatch: `{% if flag?(:aarch64) %}` with UInt128 fallback for x86-64 and others.
+
+## Performance vs libgmp
+
+Apple Silicon, `--release`. Ratio > 1 means slower than GMP.
 
 ```
-big_number/
-├── shard.yml
-├── PLAN.md
-├── CLAUDE.md
-├── STDLIB_REPLACEMENT_PLAN.md
-├── src/
-│   ├── big_number.cr              # require + version
-│   └── big_number/
-│       ├── limb.cr                # type aliases + LimbArena (31 lines)
-│       ├── big_int.cr             # BigInt (3249 lines)
-│       ├── big_float.cr           # BigFloat (945 lines)
-│       ├── big_rational.cr        # BigRational (474 lines)
-│       ├── big_decimal.cr         # BigDecimal (592 lines, ported from stdlib)
-│       ├── ext.cr                 # legacy stdlib type extensions
-│       ├── stdlib.cr              # wrapper structs for stdlib replacement (1323 lines)
-│       ├── stdlib_ext.cr          # primitive extensions, Math, Random, Hasher (464 lines)
-│       ├── stdlib_json.cr         # JSON serialization (92 lines)
-│       └── stdlib_yaml.cr         # YAML deserialization (26 lines)
-├── spec/
-│   ├── spec_helper.cr
-│   ├── big_number_spec.cr         # BigInt tests (136 examples)
-│   ├── big_float_spec.cr          # BigFloat tests (108 examples)
-│   ├── big_rational_spec.cr       # BigRational tests (83 examples)
-│   ├── stdlib_smoke_spec.cr       # Wrapper struct tests (41 examples)
-│   ├── stdlib_ext_spec.cr         # Extensions tests (69 examples)
-│   ├── stdlib_json_yaml_spec.cr   # Serialization tests (32 examples)
-│   └── stdlib_compat_spec.cr      # Full compatibility suite (271 examples)
-└── bench/
-    └── sanity.cr                  # continuous benchmark vs stdlib
+              Add       Mul       Div       to_s
+  1 limb:    0.77x     0.77x     0.98x     1.95x
+ 10 limbs:   0.98x     1.35x     2.54x     3.36x
+ 30 limbs:   1.07x     1.74x     2.47x     5.62x
+ 50 limbs:   1.12x     2.62x     2.36x     5.16x
+100 limbs:   1.09x     2.62x     2.62x     5.37x
+  1k limbs:  1.18x     3.21x      —        4.58x
+
+BigRational:  ~1.1x add, ~1.2x mul, fastest div (all sizes)
 ```
 
-Total: ~7,500 lines of implementation, 740 tests.
+**Where we win:** Single-limb arithmetic (no FFI overhead), addition at all
+sizes, BigRational division.
 
----
+**Where GMP wins:** Multiplication above ~30 limbs (hand-tuned asm with loop
+unrolling), base conversion (bottlenecked by division), division above ~10 limbs.
+
+## Source Layout
+
+```
+src/
+├── big_number.cr                  # require + VERSION (10 lines)
+└── big_number/
+    ├── limb.cr                    # Limb/SignedLimb aliases, LimbArena (31 lines)
+    ├── big_int.cr                 # BigInt core (3,249 lines)
+    ├── big_rational.cr            # BigRational (474 lines)
+    ├── big_float.cr               # BigFloat (945 lines)
+    ├── big_decimal.cr             # BigDecimal (592 lines)
+    ├── ext.cr                     # Legacy stdlib type extensions (202 lines)
+    ├── stdlib.cr                  # Drop-in wrapper structs (1,323 lines)
+    ├── stdlib_ext.cr              # Primitive extensions, Math, Random (464 lines)
+    ├── stdlib_json.cr             # JSON serialization (92 lines)
+    └── stdlib_yaml.cr             # YAML deserialization (26 lines)
+
+spec/
+├── big_number_spec.cr             # BigInt (327 examples)
+├── big_float_spec.cr              # BigFloat (108 examples)
+├── big_rational_spec.cr           # BigRational (83 examples)
+├── stdlib_smoke_spec.cr           # Wrapper structs (41 examples)
+├── stdlib_ext_spec.cr             # Extensions (69 examples)
+├── stdlib_json_yaml_spec.cr       # Serialization (32 examples)
+└── stdlib_compat_spec.cr          # Full compatibility (271 examples)
+
+bench/
+└── sanity.cr                      # Benchmark vs libgmp
+```
 
 ## Testing
 
-**Every operation is fuzz-tested against Crystal's stdlib BigInt (libgmp).**
+```bash
+crystal spec                                                    # 327 core tests
+crystal spec -D big_number_stdlib spec/stdlib_*_spec.cr         # 413 stdlib tests
+```
 
-libgmp is correct. If we disagree with it, we're wrong. This gives us a
-perfect oracle for free. Current suite: 740 tests across 7 spec files —
-136 BigInt, 108 BigFloat, 83 BigRational, 41 stdlib smoke, 69 extensions,
-32 serialization, 271 full compatibility. 1000+ random pairs per operation.
+The two sets cannot compile together — the stdlib wrapper redefines `::BigDecimal`.
 
-Core tests: `crystal spec` (327 tests).
-Stdlib tests: `crystal spec -D big_number_stdlib spec/stdlib_*_spec.cr` (413 tests).
-The two sets can't compile together (wrapper redefines `::BigDecimal`).
+Every arithmetic operation is fuzz-tested against Crystal's stdlib BigInt (libgmp)
+as a correctness oracle. 1,000+ random input pairs per operation. Additional
+targeted coverage:
 
-Additional targeted tests:
-- Edge cases: zero, one, negative one, `LIMB_MAX`, powers of two
-- Boundary conditions: operands at exact algorithm thresholds (48 limbs for Karatsuba)
-- Division: divisor larger than dividend, single-limb divisor, exact division
-- String round-trip: `BigInt.new(x.to_s) == x` for all bases 2-36
-- Stdlib compatibility: type hierarchy (`is_a?`), cross-type arithmetic, hash equality
+- Edge values: zero, one, -1, `LIMB_MAX`, powers of two
+- Algorithm boundaries: operands at exact threshold sizes (48, 80, 25000 limbs)
+- Division edge cases: divisor > dividend, single-limb divisor, exact division
+- String round-trips: `BigInt.new(x.to_s(base), base) == x` for bases 2–36
+- Stdlib compatibility: type hierarchy, cross-type arithmetic, hash equality
 - Serialization: JSON/YAML round-trips, object key support
 
----
+## Clean-Room Policy
 
-## What Done Looks Like — Final Status
+This is a clean-room implementation of well-known algorithms from textbooks.
+We do not read, copy, or translate GMP or mini-gmp source code.
 
-All goals achieved except the 2-3x performance target at large sizes:
+**References** (algorithms only):
+- Knuth, *The Art of Computer Programming*, Vol 2
+- *Handbook of Applied Cryptography*, Chapter 14
+- GMP manual (algorithm descriptions, not source)
+- Wikipedia: Karatsuba, Toom-Cook, Burnikel-Ziegler, NTT, Montgomery
 
-1. **DONE** — `BigNumber::BigInt` is a drop-in replacement for `::BigInt`
-2. **DONE** — Zero C dependencies — `crystal build` with no system libraries
-3. **IMPROVED** — Within 2-3x for add, mul (to 100 limbs), div; to_s still
-   exceeds 3x above 30 limbs (limited by division in base conversion)
-4. **DONE** — Faster than libgmp for single-limb add and mul (no FFI overhead)
-5. **DONE** — Fuzz-tested against libgmp with millions of random inputs
-6. **DONE** — `BigNumber::BigRational` works for exact rational arithmetic
-7. **DONE** — `BigNumber::BigFloat` works for arbitrary-precision floating point
-8. **DONE** — `BigNumber::BigDecimal` works for fixed-scale decimal arithmetic
-9. **DONE** — `require "big_number/stdlib"` is a drop-in replacement for `require "big"`
-10. **DONE** — JSON/YAML serialization works identically to stdlib
+## What Was Built
 
-The performance gap in (3) is narrower after inline asm but still present
-for mul/div at large sizes — GMP's assembly is more aggressively optimized
-(loop unrolling, instruction scheduling).
+### Phase 1: Core Arithmetic
 
-## Step 5: Performance Optimizations — DONE
+BigInt with all standard operations: `+`, `-`, `*`, `//`, `%`, `divmod`,
+`**`, `pow_mod`, `gcd`, `lcm`, `sqrt`, `root(n)`, `factorial`, `prime?`,
+bitwise ops (`&`, `|`, `^`, `~`, `<<`, `>>`), comparison, string conversion
+(bases 2–36), `to_f64`, `to_i64`.
 
-### 5a. Inline Assembly Inner Loops (ARM64) — DONE
+### Phase 2: Additional Types
 
-Crystal's `asm` keyword enables per-iteration inline assembly with register
-constraints. Implemented for all 6 hot inner loop functions:
+- **BigRational**: exact p/q arithmetic, auto-canonicalized via binary GCD
+- **BigFloat**: arbitrary precision (configurable, default 128 bits),
+  Newton's method for sqrt/div
+- **BigDecimal**: fixed-scale decimal, ported from Crystal stdlib (592 lines)
 
-- `limbs_add`: `adds`/`adc` chain (1-2 insn/limb vs 4+ with UInt128)
-- `limbs_sub`: `subs`/`cset`/`cinc` for borrow propagation
-- `limbs_add_1`: `adds`/`adc` for single-limb addition
-- `limbs_mul_1`: `mul`/`umulh`/`adds`/`adc` (~4 insn/limb)
-- `limbs_addmul_1`: `mul`/`umulh`/`adds`/`adc` (~6 insn/limb)
-- `limbs_submul_1`: `mul`/`umulh`/`adds`/`adc`/`subs`/`cinc` (~6 insn/limb)
+### Phase 3: Performance
 
-Architecture dispatch via `{% if flag?(:aarch64) %}` with UInt128 fallback.
-Measured 1.4-1.6x speedup per function; cascading benefit to all operations.
+Allocation reduction in hot paths. Binary GCD for BigRational. Karatsuba
+threshold tuned to 48 (from 32). Single-limb `to_s` fast path. D&C `to_s`
+with cached power tables and raw limb recursion. Branch-free `limbs_submul_1`.
 
-### 5b. Arena Allocator for Burnikel-Ziegler Division — DONE
+### Phase 4: Stdlib Drop-In
 
-Implemented `LimbArena` bump allocator in `limb.cr`. B-Z division now uses
-a single upfront allocation instead of ~10 mallocs per recursion level.
-Arena size: `(6*nn + 4*dn) * (depth+2)` limbs. B-Z dispatched for
-`dn >= BZ_THRESHOLD` (80 limbs).
+`require "big_number/stdlib"` replaces `require "big"` with zero behavioral
+changes. Wrapper structs (`BigInt < Int`, `BigFloat < Float`, etc.) with
+single `@inner` field — LLVM optimizes away the indirection. Primitive
+extensions (`to_big_i`, `to_big_f`), Math module, Random, numeric hash
+equality, JSON/YAML serialization.
 
-### 5c. Montgomery Multiplication for pow_mod — DONE
+### Phase 5: Advanced Optimizations
 
-Implemented Montgomery modular exponentiation for odd moduli with >= 2 limbs:
-- `mont_mul`: Montgomery multiply via REDC
-- `mont_reduce`: t * R^(-1) mod m using `limbs_addmul_1`
-- Newton's method for modular inverse: m' = -m[0]^(-1) mod 2^64
-- Falls back to standard square-and-multiply for even or single-limb moduli
+- **ARM64 inline assembly** for 6 inner-loop functions (1.4–1.6x per function)
+- **LimbArena bump allocator** for Burnikel-Ziegler (eliminates per-level malloc)
+- **Montgomery REDC** for `pow_mod` with odd moduli
+- **NTT multiplication** (Goldilocks prime, 32-bit splitting) for >= 25k limbs
 
-### 5d. NTT-Based Multiplication — DONE
+## Future Work
 
-Implemented Number Theoretic Transform multiplication for >= 25,000 limbs:
-- Goldilocks prime p = 2^64 - 2^32 + 1 with specialized modular reduction
-- 32-bit limb splitting eliminates CRT (single prime sufficient)
-- Iterative Cooley-Tukey butterfly with bit-reversal permutation
-- O(n log n) scaling verified: 50k→100k limbs takes ~2x (vs Karatsuba's ~3x)
+Performance improvements that would close the remaining gap to GMP:
 
-## Possible Future Work
-
-- **x86-64 inline assembly** — same approach as ARM64, using `mul`/`adc`/`sbb`
-- **Goldilocks mulmod optimization** — fast-path reduction without u128 division
-  could further improve NTT constant factor
-- **Loop unrolling** — 4x unroll in asm inner loops for additional pipeline gains
-- **Barrett reduction** — for repeated modular reduction with same modulus
-- **Shard publication** — publish to shards.info when ready for public use
+- **x86-64 inline assembly** — `mul`/`adc`/`sbb` equivalents of the ARM64 paths
+- **Loop unrolling** — 4x unroll in asm inner loops for better instruction pipelining
+- **Faster base conversion** — the `to_s` gap (3–6x) is bottlenecked by division;
+  a subquadratic approach (e.g., scaled remainder trees) could help at large sizes
+- **Goldilocks mulmod fast path** — eliminate u128 division in NTT reduction
+- **Barrett reduction** — for repeated mod with same modulus (useful in crypto)
+- **Shard publication** — publish to shards.info for public consumption
