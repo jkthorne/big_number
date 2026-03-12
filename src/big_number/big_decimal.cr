@@ -1,10 +1,27 @@
 module BigNumber
+  # Raised when a `BigDecimal` cannot be parsed from a string.
+  #
+  # ```
+  # BigNumber::BigDecimal.new("not_a_number") # raises InvalidBigDecimalException
+  # ```
   class InvalidBigDecimalException < Exception
     def initialize(big_decimal_str : String, reason : String)
       super("Invalid BigDecimal: #{big_decimal_str} (#{reason})")
     end
   end
 
+  # Arbitrary-precision decimal arithmetic with fixed scale.
+  #
+  # A `BigDecimal` is represented as a `BigInt` *value* and a `UInt64` *scale*,
+  # where the numeric value equals `value * 10^(-scale)`. This avoids the
+  # rounding errors inherent in binary floating-point representations.
+  #
+  # ```
+  # d = BigNumber::BigDecimal.new("123.456")
+  # d.value # => BigInt(123456)
+  # d.scale # => 3
+  # d + BigNumber::BigDecimal.new("0.544") # => 124.0
+  # ```
   struct BigDecimal
     include Comparable(BigDecimal)
     include Comparable(Int)
@@ -19,9 +36,13 @@ module BigNumber
     private FIVE_I = BigInt.new(5)
     private TEN_I  = BigInt.new(10)
 
+    # Default precision (number of decimal digits) used for division.
     DEFAULT_PRECISION = 100_u64
 
+    # Returns the unscaled `BigInt` value. The decimal value is `value * 10^(-scale)`.
     getter value : BigInt
+
+    # Returns the scale (number of decimal digits after the point).
     getter scale : UInt64
 
     # Creates a new `BigDecimal` from `Float`.
@@ -57,6 +78,13 @@ module BigNumber
     end
 
     # Creates a new `BigDecimal` from a `String`.
+    #
+    # Supports optional sign, decimal point, underscores, and scientific notation.
+    #
+    # ```
+    # BigNumber::BigDecimal.new("1.5e2") # => 150.0
+    # BigNumber::BigDecimal.new("-0.01") # => -0.01
+    # ```
     def initialize(str : String)
       str = str.lchop('+')
       str = str.delete('_')
@@ -140,10 +168,12 @@ module BigNumber
 
     # --- Arithmetic ---
 
+    # Returns the negation of this decimal.
     def - : BigDecimal
       BigDecimal.new(-@value, @scale)
     end
 
+    # Returns the sum of `self` and *other*.
     def +(other : BigDecimal) : BigDecimal
       if @scale > other.scale
         scaled = other.scale_to(self)
@@ -156,14 +186,17 @@ module BigNumber
       end
     end
 
+    # Returns the sum of `self` and *other*.
     def +(other : Int) : BigDecimal
       self + BigDecimal.new(other)
     end
 
+    # Returns the sum of `self` and *other*.
     def +(other : BigInt) : BigDecimal
       self + BigDecimal.new(other)
     end
 
+    # Returns the difference of `self` and *other*.
     def -(other : BigDecimal) : BigDecimal
       if @scale > other.scale
         scaled = other.scale_to(self)
@@ -176,26 +209,32 @@ module BigNumber
       end
     end
 
+    # Returns the difference of `self` and *other*.
     def -(other : Int) : BigDecimal
       self - BigDecimal.new(other)
     end
 
+    # Returns the difference of `self` and *other*.
     def -(other : BigInt) : BigDecimal
       self - BigDecimal.new(other)
     end
 
+    # Returns the product of `self` and *other*.
     def *(other : BigDecimal) : BigDecimal
       BigDecimal.new(@value * other.value, @scale + other.scale)
     end
 
+    # Returns the product of `self` and *other*.
     def *(other : Int) : BigDecimal
       self * BigDecimal.new(other)
     end
 
+    # Returns the product of `self` and *other*.
     def *(other : BigInt) : BigDecimal
       self * BigDecimal.new(other)
     end
 
+    # Returns the remainder of `self` divided by *other*.
     def %(other : BigDecimal) : BigDecimal
       if @scale > other.scale
         scaled = other.scale_to(self)
@@ -208,22 +247,36 @@ module BigNumber
       end
     end
 
+    # Returns the remainder of `self` divided by *other*.
     def %(other : Int) : BigDecimal
       self % BigDecimal.new(other)
     end
 
+    # Returns the quotient of `self` divided by *other* using `DEFAULT_PRECISION`.
     def /(other : BigDecimal) : BigDecimal
       div other
     end
 
+    # Returns the quotient of `self` divided by *other*.
     def /(other : Int) : BigDecimal
       self / BigDecimal.new(other)
     end
 
+    # Returns the quotient of `self` divided by *other*.
     def /(other : BigInt) : BigDecimal
       self / BigDecimal.new(other)
     end
 
+    # Divides `self` by *other* with the given decimal digit *precision*.
+    #
+    # For exact divisions (e.g. dividing by powers of 2 and 5), the result
+    # may use fewer digits than *precision*. For non-terminating decimals,
+    # the result is truncated to *precision* digits.
+    #
+    # ```
+    # BigNumber::BigDecimal.new(1).div(BigNumber::BigDecimal.new(3), 10)
+    # # => 0.3333333333
+    # ```
     def div(other : BigDecimal, precision : Int = DEFAULT_PRECISION) : BigDecimal
       check_division_by_zero other
       return self if @value.zero?
@@ -272,6 +325,8 @@ module BigNumber
       BigDecimal.new(normalize_quotient(other, quotient), scale + scale_add)
     end
 
+    # Returns `self` raised to the power *other*.
+    # Negative exponents convert through `BigRational`.
     def **(other : Int) : BigDecimal
       return (to_big_r ** other).to_big_d if other < 0
       BigDecimal.new(@value ** other, @scale * other)
@@ -279,6 +334,7 @@ module BigNumber
 
     # --- Comparison ---
 
+    # Compares `self` with *other*. Returns -1, 0, or 1.
     def <=>(other : BigDecimal) : Int32
       if @scale > other.scale
         @value <=> other.scale_to(self).value
@@ -289,6 +345,7 @@ module BigNumber
       end
     end
 
+    # Compares `self` with a `BigRational`.
     def <=>(other : BigRational) : Int32
       if @scale == 0
         @value <=> other
@@ -297,6 +354,7 @@ module BigNumber
       end
     end
 
+    # Compares `self` with a primitive `Float`. Returns `nil` if *other* is NaN.
     def <=>(other : Float::Primitive) : Int32?
       return nil if other.nan?
       if sign = other.infinite?
@@ -305,10 +363,12 @@ module BigNumber
       self <=> BigDecimal.new(other)
     end
 
+    # Compares `self` with an `Int`.
     def <=>(other : Int) : Int32
       self <=> BigDecimal.new(other)
     end
 
+    # Returns `true` if `self` and *other* represent the same value.
     def ==(other : BigDecimal) : Bool
       case @scale
       when .>(other.scale)
@@ -324,22 +384,27 @@ module BigNumber
 
     # --- Predicates ---
 
+    # Returns `true` if the value is zero.
     def zero? : Bool
       @value.zero?
     end
 
+    # Returns `true` if the value is positive.
     def positive? : Bool
       @value.positive?
     end
 
+    # Returns `true` if the value is negative.
     def negative? : Bool
       @value.negative?
     end
 
+    # Returns the sign as -1, 0, or 1.
     def sign : Int32
       @value.sign
     end
 
+    # Returns `true` if this decimal represents an integer (scale is effectively zero).
     def integer? : Bool
       factor_powers_of_ten
       @scale == 0
@@ -347,6 +412,7 @@ module BigNumber
 
     # --- Scaling ---
 
+    # Returns a new `BigDecimal` scaled to match *new_scale*'s scale.
     def scale_to(new_scale : BigDecimal) : BigDecimal
       in_scale(new_scale.scale)
     end
@@ -367,18 +433,22 @@ module BigNumber
 
     # --- Rounding ---
 
+    # Rounds towards positive infinity.
     def ceil : BigDecimal
       round_impl { |rem| rem > BigInt.new(0) }
     end
 
+    # Rounds towards negative infinity.
     def floor : BigDecimal
       round_impl { |rem| rem < BigInt.new(0) }
     end
 
+    # Rounds towards zero (truncation).
     def trunc : BigDecimal
       round_impl { false }
     end
 
+    # Rounds to the nearest integer, ties to even (banker's rounding).
     def round_even : BigDecimal
       round_impl do |rem, rem_range, mantissa|
         case rem.abs <=> rem_range // BigInt.new(2)
@@ -392,6 +462,7 @@ module BigNumber
       end
     end
 
+    # Rounds to the nearest integer, ties away from zero.
     def round_away : BigDecimal
       round_impl { |rem, rem_range| rem.abs >= rem_range // BigInt.new(2) }
     end
@@ -410,10 +481,16 @@ module BigNumber
 
     # --- Conversions ---
 
+    # Returns the string representation of this decimal.
+    #
+    # ```
+    # BigNumber::BigDecimal.new("1.20").to_s # => "1.2"
+    # ```
     def to_s : String
       String.build { |io| to_s(io) }
     end
 
+    # Writes the string representation to *io*.
     def to_s(io : IO) : Nil
       factor_powers_of_ten
 
@@ -445,51 +522,63 @@ module BigNumber
       end
     end
 
+    # :nodoc:
     def inspect(io : IO) : Nil
       to_s(io)
     end
 
+    # :nodoc:
     def inspect : String
       to_s
     end
 
+    # Converts to `BigInt` by truncating the fractional part.
     def to_big_i : BigInt
       trunc.value
     end
 
+    # Converts to `BigFloat` with the given *precision* in bits.
     def to_big_f(*, precision : Int32 = BigFloat.default_precision) : BigFloat
       BigFloat.new(to_s, precision: precision)
     end
 
+    # Returns `self`.
     def to_big_d : BigDecimal
       self
     end
 
+    # Converts to an exact `BigRational` representation.
     def to_big_r : BigRational
       BigRational.new(@value, power_ten_to(@scale))
     end
 
+    # Converts to `Int32` (truncates, raises on overflow).
     def to_i : Int32
       to_i32
     end
 
+    # Converts to `Int32` (truncates, wraps on overflow).
     def to_i! : Int32
       to_i32!
     end
 
+    # Converts to `UInt32` (truncates, raises on overflow).
     def to_u : UInt32
       to_u32
     end
 
+    # Converts to `UInt32` (truncates, wraps on overflow).
     def to_u! : UInt32
       to_u32!
     end
 
     {% for info in [{Int8, "i8"}, {Int16, "i16"}, {Int32, "i32"}, {Int64, "i64"}] %}
+      # Converts to `{{info[0]}}` (truncates, raises on overflow).
       def to_{{info[1].id}} : {{info[0]}}
         to_big_i.to_{{info[1].id}}
       end
 
+      # Converts to `{{info[0]}}` (truncates, wraps on overflow).
       def to_{{info[1].id}}! : {{info[0]}}
         to_big_i.to_{{info[1].id}}!
       end
@@ -505,43 +594,53 @@ module BigNumber
     end
 
     {% for info in [{UInt8, "u8"}, {UInt16, "u16"}, {UInt32, "u32"}, {UInt64, "u64"}] %}
+      # Converts to `{{info[0]}}` (truncates, raises on overflow).
       def to_{{info[1].id}} : {{info[0]}}
         to_big_u.to_{{info[1].id}}
       end
 
+      # Converts to `{{info[0]}}` (truncates, wraps on overflow).
       def to_{{info[1].id}}! : {{info[0]}}
         to_big_u!.to_{{info[1].id}}!
       end
     {% end %}
 
+    # Converts to `Float64`.
     def to_f64 : Float64
       to_s.to_f64
     end
 
+    # Converts to `Float32`.
     def to_f32 : Float32
       to_f64.to_f32
     end
 
+    # Converts to `Float64`.
     def to_f : Float64
       to_f64
     end
 
+    # Converts to `Float32` (wraps on overflow).
     def to_f32! : Float32
       to_f64.to_f32!
     end
 
+    # Converts to `Float64` (never overflows).
     def to_f64! : Float64
       to_f64
     end
 
+    # Converts to `Float64` (never overflows).
     def to_f! : Float64
       to_f64!
     end
 
+    # Returns `self` (value type, no copy needed).
     def clone : BigDecimal
       self
     end
 
+    # :nodoc:
     def hash(hasher)
       hasher = @value.hash(hasher)
       hasher = @scale.hash(hasher)
@@ -550,6 +649,7 @@ module BigNumber
 
     # --- Internal helpers ---
 
+    # :nodoc:
     def normalize_quotient(other : BigDecimal, quotient : BigInt) : BigInt
       if (@value.negative? && other.value.positive?) || (other.value.negative? && @value.positive?)
         -quotient.abs
@@ -566,6 +666,7 @@ module BigNumber
       TEN_I ** x
     end
 
+    # :nodoc:
     protected def mul_power_of_ten(exponent : Int) : BigDecimal
       if exponent <= @scale
         BigDecimal.new(@value, @scale - exponent)
@@ -574,6 +675,7 @@ module BigNumber
       end
     end
 
+    # :nodoc:
     protected def factor_powers_of_ten : Nil
       if @scale > 0
         neg = @value.negative?
