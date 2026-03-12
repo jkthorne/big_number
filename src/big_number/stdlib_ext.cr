@@ -4,189 +4,241 @@
 # This file is required by stdlib.cr and should not be required directly.
 
 # ==========================================================================
-# Primitive type conversions
+# Primitive type conversions — Int
 # ==========================================================================
 
 struct Int
   include Comparable(BigInt)
   include Comparable(BigRational)
 
+  # Converts this integer to a `BigInt`.
   def to_big_i : BigInt
     BigInt.new(self)
   end
 
+  # Converts this integer to a `BigFloat`.
   def to_big_f : BigFloat
     BigFloat.new(self)
   end
 
+  # Converts this integer to a `BigRational` with denominator 1.
   def to_big_r : BigRational
     BigRational.new(self, 1)
   end
 
+  # Converts this integer to a `BigDecimal` with scale 0.
   def to_big_d : BigDecimal
     BigDecimal.new(self)
   end
 
   # --- Arithmetic with BigInt ---
 
+  # Returns the sum of this `Int` and a `BigInt`.
   def +(other : BigInt) : BigInt
     other + self
   end
 
+  # Wrapping addition with `BigInt`.
   def &+(other : BigInt) : BigInt
     self + other
   end
 
+  # Returns the difference of this `Int` and a `BigInt`.
   def -(other : BigInt) : BigInt
     BigInt.new(self) - other
   end
 
+  # Wrapping subtraction with `BigInt`.
   def &-(other : BigInt) : BigInt
     self - other
   end
 
+  # Returns the product of this `Int` and a `BigInt`.
   def *(other : BigInt) : BigInt
     other * self
   end
 
+  # Wrapping multiplication with `BigInt`.
   def &*(other : BigInt) : BigInt
     self * other
   end
 
+  # Returns the floored modulo of this `Int` by a `BigInt`.
   def %(other : BigInt) : BigInt
     BigInt.new(self) % other
   end
 
+  # Compares this `Int` with a `BigInt`.
   def <=>(other : BigInt) : Int32
     -(other <=> self)
   end
 
+  # Returns `true` if this `Int` equals the `BigInt`.
   def ==(other : BigInt) : Bool
     other == self
   end
 
+  # Returns the GCD of this `Int` and a `BigInt`.
   def gcd(other : BigInt) : Int
     other.gcd(self)
   end
 
+  # Returns the LCM of this `Int` and a `BigInt`.
   def lcm(other : BigInt) : BigInt
     other.lcm(self)
   end
 
   # --- Arithmetic with BigRational ---
 
+  # Returns the sum of this `Int` and a `BigRational`.
   def +(other : BigRational) : BigRational
     other + self
   end
 
+  # Returns the difference of this `Int` and a `BigRational`.
   def -(other : BigRational) : BigRational
     self.to_big_r - other
   end
 
+  # Returns the product of this `Int` and a `BigRational`.
   def *(other : BigRational) : BigRational
     other * self
   end
 
+  # Returns the quotient of this `Int` and a `BigRational`.
   def /(other : BigRational)
     self.to_big_r / other
   end
 
+  # Compares this `Int` with a `BigRational`.
   def <=>(other : BigRational) : Int32
     -(other <=> self)
   end
 
   # --- Arithmetic with BigFloat ---
 
+  # Compares this `Int` with a `BigFloat`.
   def <=>(other : BigFloat) : Int32
     -(other <=> self)
   end
 
+  # Returns the difference of this `Int` and a `BigFloat`.
   def -(other : BigFloat) : BigFloat
     BigFloat.new(self) - other
   end
 
+  # Returns the quotient of this `Int` and a `BigFloat`.
   def /(other : BigFloat) : BigFloat
     BigFloat.new(self) / other
   end
 end
 
+# ==========================================================================
+# Primitive type conversions — Number
+# ==========================================================================
+
 struct Number
   include Comparable(BigFloat)
 
+  # Returns the sum of this `Number` and a `BigFloat`.
   def +(other : BigFloat)
     other + self
   end
 
+  # Returns the difference of this `Number` and a `BigFloat`.
   def -(other : BigFloat)
     to_big_f - other
   end
 
+  # Returns the product of this `Number` and a `BigFloat`.
   def *(other : BigFloat) : BigFloat
     other * self
   end
 
+  # Returns the quotient of this `Number` and a `BigFloat`.
   def /(other : BigFloat) : BigFloat
     to_big_f / other
   end
 
+  # Converts this number to a `BigFloat`.
   def to_big_f : BigFloat
     BigFloat.new(self)
   end
 end
+
+# ==========================================================================
+# Primitive type conversions — Float
+# ==========================================================================
 
 struct Float
   include Comparable(BigInt)
   include Comparable(BigRational)
 
+  # Converts this float to a `BigInt` (truncates).
   def to_big_i : BigInt
     BigInt.new(self)
   end
 
+  # Converts this float to a `BigFloat`.
   def to_big_f : BigFloat
     BigFloat.new(self.to_f64)
   end
 
+  # Converts this float to an exact `BigRational`.
   def to_big_r : BigRational
     BigRational.new(self)
   end
 
+  # Converts this float to a `BigDecimal`.
   def to_big_d : BigDecimal
     BigDecimal.new(self)
   end
 
+  # Compares this `Float` with a `BigInt`.
   def <=>(other : BigInt)
     cmp = other <=> self
     -cmp if cmp
   end
 
+  # Compares this `Float` with a `BigFloat`.
   def <=>(other : BigFloat)
     cmp = other <=> self
     -cmp if cmp
   end
 
+  # Compares this `Float` with a `BigRational`.
   def <=>(other : BigRational)
     cmp = other <=> self
     -cmp if cmp
   end
 
+  # Returns `self / other` as the same float type.
   def fdiv(other : BigInt | BigFloat | BigDecimal | BigRational) : self
     self.class.new(self / other)
   end
 end
 
+# ==========================================================================
+# Primitive type conversions — String
+# ==========================================================================
+
 class String
+  # Parses this string as a `BigInt` in the given *base*.
   def to_big_i(base : Int32 = 10) : BigInt
     BigInt.new(self, base)
   end
 
+  # Parses this string as a `BigFloat`.
   def to_big_f : BigFloat
     BigFloat.new(self)
   end
 
+  # Parses this string as a `BigRational`.
   def to_big_r : BigRational
     BigRational.new(self)
   end
 
+  # Parses this string as a `BigDecimal`.
   def to_big_d : BigDecimal
     BigDecimal.new(self)
   end
@@ -197,6 +249,7 @@ end
 # ==========================================================================
 
 struct BigFloat
+  # Compares this `BigFloat` with a `BigRational`.
   def <=>(other : BigRational)
     -(other <=> self)
   end
@@ -207,6 +260,7 @@ end
 # ==========================================================================
 
 struct BigFloat
+  # Creates a `BigFloat` from any `Number` via `Float64` conversion.
   def initialize(num : Number)
     @inner = BigNumber::BigFloat.new(num.to_f64)
   end
@@ -239,18 +293,27 @@ struct Float64
 end
 
 # ==========================================================================
-# Math module
+# Math module — arbitrary-precision math functions
 # ==========================================================================
 
 module Math
+  # Returns the integer square root of a `BigInt`.
+  #
+  # ```
+  # Math.isqrt(BigInt.new(49)) # => 7
+  # ```
   def isqrt(value : BigInt) : BigInt
     value.sqrt
   end
 
+  # Returns the square root of a `BigInt` as a `BigFloat`.
   def sqrt(value : BigInt) : BigFloat
     sqrt(value.to_big_f)
   end
 
+  # Returns the square root of a `BigFloat` using Newton's method.
+  #
+  # Raises `ArgumentError` if *value* is negative.
   def sqrt(value : BigFloat) : BigFloat
     raise ArgumentError.new("Square root of negative number") if value.negative?
     return BigFloat.new(0) if value.zero?
@@ -273,20 +336,23 @@ module Math
     x
   end
 
+  # Returns the square root of a `BigRational` as a `BigFloat`.
   def sqrt(value : BigRational) : BigFloat
     sqrt(value.to_big_f)
   end
 
+  # Returns the smallest power of two greater than or equal to *v*.
   def pw2ceil(v : BigInt) : BigInt
     v.next_power_of_two
   end
 end
 
 # ==========================================================================
-# Random
+# Random — BigInt random number generation
 # ==========================================================================
 
 module Random
+  # Generates a uniform random `BigInt` in `[0, max)`.
   private def rand_int(max : BigInt) : BigInt
     unless max > 0
       raise ArgumentError.new "Invalid bound for rand: #{max}"
@@ -314,6 +380,7 @@ module Random
     end
   end
 
+  # Generates a uniform random `BigInt` within the given *range*.
   private def rand_range(range : Range(BigInt, BigInt)) : BigInt
     span = range.end - range.begin
     unless range.excludes_end?
@@ -328,6 +395,10 @@ end
 
 # ==========================================================================
 # Crystal::Hasher — numeric hash equality
+#
+# Ensures that numerically equal values across BigInt, BigFloat, BigRational,
+# BigDecimal, and primitive types produce identical hash values.
+# For example: `BigInt.new(42).hash == 42.hash`.
 # ==========================================================================
 
 # :nodoc:
@@ -370,10 +441,12 @@ struct Crystal::Hasher
     result
   end
 
+  # Reduces a `BigInt` for numeric hashing.
   def self.reduce_num(value : ::BigInt) : UInt64
     reduce_inner_bigint(value.inner)
   end
 
+  # Reduces a `BigFloat` for numeric hashing.
   def self.reduce_num(value : ::BigFloat) : UInt64
     inner = value.inner
     return 0_u64 if inner.zero?
@@ -393,6 +466,7 @@ struct Crystal::Hasher
     inner.negative? ? &-x : x
   end
 
+  # Reduces a `BigRational` for numeric hashing.
   def self.reduce_num(value : ::BigRational) : UInt64
     inner = value.inner
     return 0_u64 if inner.zero?
@@ -412,6 +486,7 @@ struct Crystal::Hasher
     UInt64.mulmod(num_hash, inv, HASH_MODULUS.to_u64!) &* value.sign
   end
 
+  # Reduces a `BigDecimal` for numeric hashing.
   def self.reduce_num(value : ::BigDecimal) : UInt64
     inner = value.inner
     return 0_u64 if inner.zero?
@@ -440,24 +515,28 @@ end
 # ==========================================================================
 
 struct BigInt
+  # :nodoc:
   def hash(hasher)
     hasher.number(self)
   end
 end
 
 struct BigFloat
+  # :nodoc:
   def hash(hasher)
     hasher.number(self)
   end
 end
 
 struct BigRational
+  # :nodoc:
   def hash(hasher)
     hasher.number(self)
   end
 end
 
 struct BigDecimal
+  # :nodoc:
   def hash(hasher)
     hasher.number(self)
   end
