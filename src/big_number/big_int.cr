@@ -2099,17 +2099,17 @@ module BigNumber
 
     KARATSUBA_THRESHOLD = 48
     TOOM3_THRESHOLD     = 10_000 # Effectively disabled: Karatsuba beats Toom-3 up to ~4000 limbs
+    NTT_THRESHOLD       = 25_000
 
     # Top-level multiply dispatch. an >= bn > 0. rp must not alias ap or bp.
     protected def self.limbs_mul(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32)
       if bn < KARATSUBA_THRESHOLD
         limbs_mul_schoolbook(rp, ap, an, bp, bn)
-      elsif bn < TOOM3_THRESHOLD
+      elsif bn < NTT_THRESHOLD
         scratch = Pointer(Limb).malloc(karatsuba_scratch_size(an))
         limbs_mul_karatsuba(rp, ap, an, bp, bn, scratch)
       else
-        scratch = Pointer(Limb).malloc(toom3_scratch_size(an))
-        limbs_mul_toom3(rp, ap, an, bp, bn, scratch)
+        limbs_mul_ntt(rp, ap, an, bp, bn)
       end
     end
 
@@ -2701,6 +2701,190 @@ module BigNumber
 
       # c3 at offset 3k (add)
       limbs_add(rp + 3 * k, rp + 3 * k, rn - 3 * k, c3, c3n) if c3n > 0
+    end
+
+    # --- NTT-based multiplication for very large numbers ---
+    # Uses the Goldilocks prime p = 2^64 - 2^32 + 1 with 32-bit limb splitting.
+    # Each 64-bit limb is split into two 32-bit halves, so convolution coefficients
+    # stay below n * (2^32-1)^2 < p for n < 2^32 (billions of limbs).
+    # This avoids multi-prime CRT and enables fast Goldilocks modular reduction.
+
+    NTT_P = 0xFFFFFFFF00000001_u64 # 2^64 - 2^32 + 1 (Goldilocks prime)
+    NTT_G = 7_u64                   # primitive root mod NTT_P
+
+    # Goldilocks modular reduction: (a * b) mod p without 128-bit division.
+    # p = 2^64 - 2^32 + 1, so 2^64 ≡ 2^32 - 1 (mod p).
+    # For product = hi * 2^64 + lo, result ≡ lo + hi * (2^32 - 1) (mod p).
+    @[AlwaysInline]
+    private def self.goldilocks_mulmod(a : UInt64, b : UInt64) : UInt64
+      prod = a.to_u128 &* b.to_u128
+      lo = prod.to_u64!
+      hi = (prod >> 64).to_u64!
+      # lo + hi * (2^32 - 1) = lo + hi * 2^32 - hi
+      # = lo - hi + hi * 2^32
+      # Split hi*2^32: upper 32 bits go to next reduction
+      hi_lo = hi & 0xFFFFFFFF_u64          # low 32 bits of hi
+      hi_hi = hi >> 32                      # high 32 bits of hi
+      # result = lo + hi_lo * 2^32 - hi + hi_hi * (2^32-1)  [from reducing hi_hi * 2^64]
+      # But we can accumulate more carefully:
+      # step 1: t = lo - hi (mod p)
+      # step 2: t += (hi << 32) (mod p)  — but hi<<32 might overflow u64
+      # Use a different decomposition:
+      # result = lo + hi * 2^32 - hi  (mod p)
+      # hi * 2^32 = (hi_hi << 64) | (hi_lo << 32)
+      # So: result = lo + (hi_lo << 32) - hi + hi_hi * (2^32 - 1)  (mod p)
+      #            = lo + (hi_lo << 32) - hi + (hi_hi << 32) - hi_hi  (mod p)
+      #            = lo + ((hi_lo + hi_hi) << 32) - hi - hi_hi  (mod p)
+      # This is getting complex. Use a simpler 2-step reduction:
+      p = NTT_P
+      # Step 1: reduce hi*2^64 → hi*(2^32-1)
+      t1 = (hi.to_u128 << 32) &- hi.to_u128  # hi * (2^32 - 1), fits in ~96 bits
+      s = lo.to_u128 &+ t1
+      # Step 2: if s >= 2^64, reduce again
+      lo2 = s.to_u64!
+      hi2 = (s >> 64).to_u64!
+      if hi2 > 0
+        t2 = (hi2.to_u128 << 32) &- hi2.to_u128
+        s2 = lo2.to_u128 &+ t2
+        lo2 = s2.to_u64!
+        hi2 = (s2 >> 64).to_u64!
+        if hi2 > 0
+          # One more reduction (rare)
+          t3 = (hi2.to_u128 << 32) &- hi2.to_u128
+          lo2 = (lo2.to_u128 &+ t3).to_u64!
+        end
+      end
+      # Final canonical reduction
+      lo2 >= p ? lo2 &- p : lo2
+    end
+
+    # Modular exponentiation mod Goldilocks prime
+    private def self.goldilocks_powmod(base : UInt64, exp : UInt64) : UInt64
+      result = 1_u64
+      b = base % NTT_P
+      e = exp
+      while e > 0
+        result = goldilocks_mulmod(result, b) if e & 1 == 1
+        e >>= 1
+        b = goldilocks_mulmod(b, b) if e > 0
+      end
+      result
+    end
+
+    # In-place iterative NTT using Goldilocks prime.
+    private def self.ntt_forward(data : Pointer(UInt64), n : Int32, g : UInt64)
+      p = NTT_P
+      # Bit-reversal permutation
+      j = 0
+      i = 1
+      while i < n
+        bit = n >> 1
+        while j & bit != 0
+          j ^= bit
+          bit >>= 1
+        end
+        j ^= bit
+        if i < j
+          data[i], data[j] = data[j], data[i]
+        end
+        i += 1
+      end
+
+      # Butterfly stages
+      len = 2
+      while len <= n
+        w = goldilocks_powmod(g, (p - 1) // len.to_u64!)
+        half = len >> 1
+        i = 0
+        while i < n
+          wn = 1_u64
+          k = 0
+          while k < half
+            u = data[i + k]
+            v = goldilocks_mulmod(data[i + k + half], wn)
+            sum = u &+ v
+            data[i + k] = sum >= p ? sum &- p : sum
+            data[i + k + half] = u >= v ? u &- v : u &+ p &- v
+            wn = goldilocks_mulmod(wn, w)
+            k += 1
+          end
+          i += len
+        end
+        len <<= 1
+      end
+    end
+
+    # Inverse NTT
+    private def self.ntt_inverse(data : Pointer(UInt64), n : Int32, g : UInt64)
+      g_inv = goldilocks_powmod(g, NTT_P - 2)
+      ntt_forward(data, n, g_inv)
+      n_inv = goldilocks_powmod(n.to_u64!, NTT_P - 2)
+      i = 0
+      while i < n
+        data[i] = goldilocks_mulmod(data[i], n_inv)
+        i += 1
+      end
+    end
+
+    # NTT-based multiplication for large limb arrays.
+    # Splits each 64-bit limb into two 32-bit halves, performs convolution
+    # using the Goldilocks prime, then reconstructs with carry propagation.
+    protected def self.limbs_mul_ntt(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32)
+      # Split into 32-bit pieces: 2*an and 2*bn elements
+      sa = an * 2
+      sb = bn * 2
+      result_pieces = sa + sb  # convolution output length
+
+      # Transform size: next power of 2 >= result_pieces
+      n = 1
+      while n < result_pieces
+        n <<= 1
+      end
+
+      # Split and zero-pad
+      fa = Pointer(UInt64).malloc(n)
+      fb = Pointer(UInt64).malloc(n)
+      i = 0
+      while i < an
+        fa[i * 2] = ap[i] & 0xFFFFFFFF_u64
+        fa[i * 2 + 1] = ap[i] >> 32
+        i += 1
+      end
+      i = 0
+      while i < bn
+        fb[i * 2] = bp[i] & 0xFFFFFFFF_u64
+        fb[i * 2 + 1] = bp[i] >> 32
+        i += 1
+      end
+
+      ntt_forward(fa, n, NTT_G)
+      ntt_forward(fb, n, NTT_G)
+
+      # Pointwise multiply
+      i = 0
+      while i < n
+        fa[i] = goldilocks_mulmod(fa[i], fb[i])
+        i += 1
+      end
+
+      ntt_inverse(fa, n, NTT_G)
+
+      # Reconstruct 64-bit limbs from 32-bit convolution results with carry propagation.
+      # Each fa[k] is the sum of products of 32-bit pieces.
+      # Pairs of consecutive pieces combine into one 64-bit limb.
+      result_len = an + bn
+      carry = 0_u128
+      i = 0
+      while i < result_len
+        lo_idx = i * 2
+        hi_idx = i * 2 + 1
+        lo_val = lo_idx < result_pieces ? fa[lo_idx].to_u128 : 0_u128
+        hi_val = hi_idx < result_pieces ? fa[hi_idx].to_u128 : 0_u128
+        total = lo_val &+ (hi_val << 32) &+ carry
+        rp[i] = total.to_u64!
+        carry = total >> 64
+        i += 1
+      end
     end
 
     # Divide limb array by a single limb. Returns remainder.
