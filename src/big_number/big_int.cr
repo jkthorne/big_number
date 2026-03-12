@@ -1735,18 +1735,54 @@ module BigNumber
     protected def self.limbs_add(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32) : Limb
       carry = 0_u64
       i = 0
-      while i < bn
-        sum = ap[i].to_u128 &+ bp[i].to_u128 &+ carry.to_u128
-        rp[i] = sum.to_u64!
-        carry = (sum >> 64).to_u64!
-        i += 1
-      end
-      while i < an
-        sum = ap[i].to_u128 &+ carry.to_u128
-        rp[i] = sum.to_u64!
-        carry = (sum >> 64).to_u64!
-        i += 1
-      end
+      {% if flag?(:aarch64) %}
+        while i < bn
+          a = ap[i]
+          b = bp[i]
+          r = 0_u64
+          c_out = 0_u64
+          asm(
+            "adds  $0, $2, $3   \n" \
+            "adc   $1, xzr, xzr \n" \
+            "adds  $0, $0, $4   \n" \
+            "adc   $1, $1, xzr  \n"
+            : "=&r"(r), "=&r"(c_out)
+            : "r"(a), "r"(b), "r"(carry)
+            : "cc"
+          )
+          rp[i] = r
+          carry = c_out
+          i += 1
+        end
+        while i < an
+          a = ap[i]
+          r = 0_u64
+          c_out = 0_u64
+          asm(
+            "adds  $0, $2, $3   \n" \
+            "adc   $1, xzr, xzr \n"
+            : "=&r"(r), "=&r"(c_out)
+            : "r"(a), "r"(carry)
+            : "cc"
+          )
+          rp[i] = r
+          carry = c_out
+          i += 1
+        end
+      {% else %}
+        while i < bn
+          sum = ap[i].to_u128 &+ bp[i].to_u128 &+ carry.to_u128
+          rp[i] = sum.to_u64!
+          carry = (sum >> 64).to_u64!
+          i += 1
+        end
+        while i < an
+          sum = ap[i].to_u128 &+ carry.to_u128
+          rp[i] = sum.to_u64!
+          carry = (sum >> 64).to_u64!
+          i += 1
+        end
+      {% end %}
       carry
     end
 
@@ -1754,75 +1790,204 @@ module BigNumber
     protected def self.limbs_sub(rp : Pointer(Limb), ap : Pointer(Limb), an : Int32, bp : Pointer(Limb), bn : Int32) : Limb
       borrow = 0_u64
       i = 0
-      while i < bn
-        b1 = ap[i] < bp[i] ? 1_u64 : 0_u64
-        d = ap[i] &- bp[i]
-        b2 = d < borrow ? 1_u64 : 0_u64
-        rp[i] = d &- borrow
-        borrow = b1 &+ b2
-        i += 1
-      end
-      while i < an
-        b = ap[i] < borrow ? 1_u64 : 0_u64
-        rp[i] = ap[i] &- borrow
-        borrow = b
-        i += 1
-      end
+      {% if flag?(:aarch64) %}
+        while i < bn
+          a = ap[i]
+          b = bp[i]
+          r = 0_u64
+          b_out = 0_u64
+          asm(
+            "subs  $0, $2, $3   \n" \
+            "cset  $1, cc        \n" \
+            "subs  $0, $0, $4   \n" \
+            "cinc  $1, $1, cc    \n"
+            : "=&r"(r), "=&r"(b_out)
+            : "r"(a), "r"(b), "r"(borrow)
+            : "cc"
+          )
+          rp[i] = r
+          borrow = b_out
+          i += 1
+        end
+        while i < an
+          a = ap[i]
+          r = 0_u64
+          b_out = 0_u64
+          asm(
+            "subs  $0, $2, $3   \n" \
+            "cset  $1, cc        \n"
+            : "=&r"(r), "=&r"(b_out)
+            : "r"(a), "r"(borrow)
+            : "cc"
+          )
+          rp[i] = r
+          borrow = b_out
+          i += 1
+        end
+      {% else %}
+        while i < bn
+          b1 = ap[i] < bp[i] ? 1_u64 : 0_u64
+          d = ap[i] &- bp[i]
+          b2 = d < borrow ? 1_u64 : 0_u64
+          rp[i] = d &- borrow
+          borrow = b1 &+ b2
+          i += 1
+        end
+        while i < an
+          b = ap[i] < borrow ? 1_u64 : 0_u64
+          rp[i] = ap[i] &- borrow
+          borrow = b
+          i += 1
+        end
+      {% end %}
       borrow
     end
 
     # Add a single limb to a limb array. Returns carry.
     protected def self.limbs_add_1(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, b : Limb) : Limb
-      carry = b.to_u128
-      i = 0
-      while i < n
-        sum = ap[i].to_u128 &+ carry
-        rp[i] = sum.to_u64!
-        carry = sum >> 64
-        i += 1
-      end
-      carry.to_u64!
+      {% if flag?(:aarch64) %}
+        carry = b
+        i = 0
+        while i < n
+          a = ap[i]
+          r = 0_u64
+          c_out = 0_u64
+          asm(
+            "adds  $0, $2, $3   \n" \
+            "adc   $1, xzr, xzr \n"
+            : "=&r"(r), "=&r"(c_out)
+            : "r"(a), "r"(carry)
+            : "cc"
+          )
+          rp[i] = r
+          carry = c_out
+          i += 1
+        end
+        carry
+      {% else %}
+        carry = b.to_u128
+        i = 0
+        while i < n
+          sum = ap[i].to_u128 &+ carry
+          rp[i] = sum.to_u64!
+          carry = sum >> 64
+          i += 1
+        end
+        carry.to_u64!
+      {% end %}
     end
 
     # Multiply a limb array by a single limb. Returns carry.
     protected def self.limbs_mul_1(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, b : Limb) : Limb
-      carry = 0_u128
+      carry = 0_u64
       i = 0
-      while i < n
-        prod = ap[i].to_u128 &* b.to_u128 &+ carry
-        rp[i] = prod.to_u64!
-        carry = prod >> 64
-        i += 1
-      end
-      carry.to_u64!
+      {% if flag?(:aarch64) %}
+        while i < n
+          x_ap = ap[i]
+          lo = 0_u64
+          hi = 0_u64
+          asm(
+            "mul   $0, $3, $4    \n" \
+            "umulh $1, $3, $4    \n" \
+            "adds  $0, $0, $2   \n" \
+            "adc   $1, $1, xzr  \n"
+            : "=&r"(lo), "=&r"(hi)
+            : "r"(carry), "r"(x_ap), "r"(b)
+            : "cc"
+          )
+          rp[i] = lo
+          carry = hi
+          i += 1
+        end
+      {% else %}
+        carry_128 = 0_u128
+        while i < n
+          prod = ap[i].to_u128 &* b.to_u128 &+ carry_128
+          rp[i] = prod.to_u64!
+          carry_128 = prod >> 64
+          i += 1
+        end
+        carry = carry_128.to_u64!
+      {% end %}
+      carry
     end
 
     # rp[] += ap[] * b. Returns carry out.
     protected def self.limbs_addmul_1(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, b : Limb) : Limb
-      carry = 0_u128
+      carry = 0_u64
       i = 0
-      while i < n
-        prod = ap[i].to_u128 &* b.to_u128 &+ rp[i].to_u128 &+ carry
-        rp[i] = prod.to_u64!
-        carry = prod >> 64
-        i += 1
-      end
-      carry.to_u64!
+      {% if flag?(:aarch64) %}
+        while i < n
+          x_ap = ap[i]
+          x_rp = rp[i]
+          lo = 0_u64
+          hi = 0_u64
+          asm(
+            "mul   $0, $4, $5    \n" \
+            "umulh $1, $4, $5    \n" \
+            "adds  $0, $0, $2   \n" \
+            "adc   $1, $1, xzr  \n" \
+            "adds  $0, $0, $3   \n" \
+            "adc   $1, $1, xzr  \n"
+            : "=&r"(lo), "=&r"(hi)
+            : "r"(x_rp), "r"(carry), "r"(x_ap), "r"(b)
+            : "cc"
+          )
+          rp[i] = lo
+          carry = hi
+          i += 1
+        end
+      {% else %}
+        carry_128 = 0_u128
+        while i < n
+          prod = ap[i].to_u128 &* b.to_u128 &+ rp[i].to_u128 &+ carry_128
+          rp[i] = prod.to_u64!
+          carry_128 = prod >> 64
+          i += 1
+        end
+        carry = carry_128.to_u64!
+      {% end %}
+      carry
     end
 
     # rp[] -= ap[] * b. Returns borrow out.
     protected def self.limbs_submul_1(rp : Pointer(Limb), ap : Pointer(Limb), n : Int32, b : Limb) : Limb
-      borrow = 0_u128
+      borrow = 0_u64
       i = 0
-      while i < n
-        prod = ap[i].to_u128 &* b.to_u128 &+ borrow
-        lo = prod.to_u64!
-        old = rp[i]
-        rp[i] = old &- lo
-        borrow = (prod >> 64) &+ (old < lo ? 1_u128 : 0_u128)
-        i += 1
-      end
-      borrow.to_u64!
+      {% if flag?(:aarch64) %}
+        while i < n
+          x_ap = ap[i]
+          x_rp = rp[i]
+          lo = 0_u64
+          new_borrow = 0_u64
+          asm(
+            "mul   $0, $4, $5    \n" \
+            "umulh $1, $4, $5    \n" \
+            "adds  $0, $0, $3   \n" \
+            "adc   $1, $1, xzr  \n" \
+            "subs  $0, $2, $0   \n" \
+            "cinc  $1, $1, cc    \n"
+            : "=&r"(lo), "=&r"(new_borrow)
+            : "r"(x_rp), "r"(borrow), "r"(x_ap), "r"(b)
+            : "cc"
+          )
+          rp[i] = lo
+          borrow = new_borrow
+          i += 1
+        end
+      {% else %}
+        borrow_128 = 0_u128
+        while i < n
+          prod = ap[i].to_u128 &* b.to_u128 &+ borrow_128
+          lo = prod.to_u64!
+          old = rp[i]
+          rp[i] = old &- lo
+          borrow_128 = (prod >> 64) &+ (old < lo ? 1_u128 : 0_u128)
+          i += 1
+        end
+        borrow = borrow_128.to_u64!
+      {% end %}
+      borrow
     end
 
     KARATSUBA_THRESHOLD = 48
