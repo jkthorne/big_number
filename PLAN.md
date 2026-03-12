@@ -211,7 +211,7 @@ All 8 phases complete. See `STDLIB_REPLACEMENT_PLAN.md` for the full phase
 breakdown.
 
 - **Phase 1-3:** API gaps filled in BigInt, BigRational, BigFloat — DONE
-- **Phase 4:** BigDecimal ported from stdlib (`big_decimal.cr`, ~375 lines) — DONE
+- **Phase 4:** BigDecimal ported from stdlib (`big_decimal.cr`, 592 lines) — DONE
 - **Phase 5:** Wrapper structs (`stdlib.cr`, 1323 lines) — DONE
   - `BigInt < Int`, `BigFloat < Float`, `BigRational < Number`, `BigDecimal < Number`
   - Single `@inner` field delegates to BigNumber types; LLVM optimizes away wrapper
@@ -252,15 +252,15 @@ big_number/
 │   ├── big_number.cr              # require + version
 │   └── big_number/
 │       ├── limb.cr                # type aliases
-│       ├── big_int.cr             # BigInt (~2860 lines)
-│       ├── big_float.cr           # BigFloat (~750 lines)
-│       ├── big_rational.cr        # BigRational (~360 lines)
-│       ├── big_decimal.cr         # BigDecimal (~375 lines, ported from stdlib)
+│       ├── big_int.cr             # BigInt (2862 lines)
+│       ├── big_float.cr           # BigFloat (945 lines)
+│       ├── big_rational.cr        # BigRational (474 lines)
+│       ├── big_decimal.cr         # BigDecimal (592 lines, ported from stdlib)
 │       ├── ext.cr                 # legacy stdlib type extensions
-│       ├── stdlib.cr              # wrapper structs for stdlib replacement (~1320 lines)
-│       ├── stdlib_ext.cr          # primitive extensions, Math, Random, Hasher (~460 lines)
-│       ├── stdlib_json.cr         # JSON serialization (~90 lines)
-│       └── stdlib_yaml.cr         # YAML deserialization (~25 lines)
+│       ├── stdlib.cr              # wrapper structs for stdlib replacement (1323 lines)
+│       ├── stdlib_ext.cr          # primitive extensions, Math, Random, Hasher (464 lines)
+│       ├── stdlib_json.cr         # JSON serialization (92 lines)
+│       └── stdlib_yaml.cr         # YAML deserialization (26 lines)
 ├── spec/
 │   ├── spec_helper.cr
 │   ├── big_number_spec.cr         # BigInt tests (136 examples)
@@ -274,10 +274,7 @@ big_number/
     └── sanity.cr                  # continuous benchmark vs stdlib
 ```
 
-Total: ~6,700 lines of implementation, 740 tests.
-
-If `big_int.cr` hits 3,000+ lines, split by what's cohesive: multiplication
-algorithms are ~600 lines and could be their own file. Let the code decide.
+Total: ~7,000 lines of implementation, 740 tests.
 
 ---
 
