@@ -483,8 +483,12 @@ module BigNumber
       qn = an - bn + 1
       q = BigInt.new(capacity: qn)
       r = BigInt.new(capacity: bn)
-      scratch = Pointer(Limb).malloc(an + bn + 1)
-      BigInt.limbs_div_rem(q.@limbs, r.@limbs, @limbs, an, other.@limbs, bn, scratch)
+      if bn >= BZ_THRESHOLD
+        BigInt.limbs_div_rem_bz(q.@limbs, r.@limbs, @limbs, an, other.@limbs, bn)
+      else
+        scratch = Pointer(Limb).malloc(an + bn + 1)
+        BigInt.limbs_div_rem(q.@limbs, r.@limbs, @limbs, an, other.@limbs, bn, scratch)
+      end
       q.set_size(qn)
       q.normalize!
       r.set_size(bn)
@@ -2709,68 +2713,55 @@ module BigNumber
       end
     end
 
-    # Burnikel-Ziegler: divide np[0..nn-1] by dp[0..dn-1].
-    # Stores quotient in qp[0..nn-dn], remainder in rp[0..dn-1].
-    # NOTE: Currently unused — overhead from per-level allocation negates
-    # the algorithmic advantage at sizes up to ~1000 limbs.
-    # Kept for future work (pre-allocated arena, larger-number targets).
+    BZ_THRESHOLD = 80
+
+    # Burnikel-Ziegler division entry point. Allocates arena upfront, then delegates.
     protected def self.limbs_div_rem_bz(qp : Pointer(Limb), rp : Pointer(Limb),
                                          np : Pointer(Limb), nn : Int32,
                                          dp : Pointer(Limb), dn : Int32)
+      # Estimate arena size: ~6n per recursion level, O(log n) depth
+      depth = 0
+      t = dn
+      while t >= 60
+        t = (t + 1) >> 1
+        depth += 1
+      end
+      arena_size = (6 * nn + 4 * dn) * (depth + 2) + nn + dn + 10
+      arena = LimbArena.new(arena_size)
+      limbs_div_rem_bz_inner(qp, rp, np, nn, dp, dn, arena)
+    end
+
+    protected def self.limbs_div_rem_bz_inner(qp : Pointer(Limb), rp : Pointer(Limb),
+                                                np : Pointer(Limb), nn : Int32,
+                                                dp : Pointer(Limb), dn : Int32,
+                                                arena : LimbArena)
       # For nn <= 2*dn, single div_2n_by_n (with padding)
       if nn <= 2 * dn
-        # Pad A to 2*dn limbs
-        ap = Pointer(Limb).malloc(2 * dn)
+        ap = arena.alloc(2 * dn)
         ap.copy_from(np, nn)
-        i = nn
-        while i < 2 * dn
-          ap[i] = 0_u64
-          i += 1
-        end
-        q_tmp = Pointer(Limb).malloc(dn)
-        bz_div_2n_by_n(q_tmp, rp, ap, dp, dn)
+        q_tmp = arena.alloc(dn)
+        bz_div_2n_by_n(q_tmp, rp, ap, dp, dn, arena)
         qn = nn - dn + 1
         qp.copy_from(q_tmp, qn)
         return
       end
 
       # nn > 2*dn: process in blocks from most significant to least significant.
-      # Each step does a 2*dn by dn division.
       block = dn
       qn = nn - dn + 1
-
-      # Work buffer: holds the running remainder (up to 2*block limbs)
-      work = Pointer(Limb).malloc(2 * block + 1)
-
-      # Initialize: copy the top block of np into work
-      # We process from top to bottom. The first block to divide starts at np[nn-2*block]
-      # But nn might not be a multiple of block. Handle the first "partial" block.
-
-      # Number of block-sized quotient groups
-      # Each step produces `block` quotient limbs (except possibly the last)
       blocks = (qn + block - 1) // block
 
-      # Copy remainder of dividend into a working array
-      rem = Pointer(Limb).malloc(nn + 1)
+      rem = arena.alloc(nn + 1)
       rem.copy_from(np, nn)
-      rem[nn] = 0_u64
       rem_n = nn
 
       j = blocks - 1
       while j >= 0
-        # Position of this quotient block
         q_pos = j * block
-        # The relevant dividend portion is rem[q_pos..q_pos+2*block-1]
-        # Divide rem[q_pos..q_pos+2*block-1] by dp[0..dn-1]
-
-        # How many dividend limbs above q_pos?
         above = rem_n - q_pos
-        if above > 2 * block
-          above = 2 * block
-        end
+        above = 2 * block if above > 2 * block
 
         if above <= 0
-          # No more dividend limbs to process
           k = 0
           while k < block && q_pos + k < qn
             qp[q_pos + k] = 0_u64
@@ -2780,33 +2771,24 @@ module BigNumber
           next
         end
 
-        # Pad to 2*block limbs
-        ap = Pointer(Limb).malloc(2 * block)
+        ap = arena.alloc(2 * block)
         ap.copy_from(rem + q_pos, above)
-        k = above
-        while k < 2 * block
-          ap[k] = 0_u64
-          k += 1
-        end
 
-        q_block = Pointer(Limb).malloc(block)
-        r_block = Pointer(Limb).malloc(block)
-        bz_div_2n_by_n(q_block, r_block, ap, dp, block)
+        q_block = arena.alloc(block)
+        r_block = arena.alloc(block)
+        bz_div_2n_by_n(q_block, r_block, ap, dp, block, arena)
 
-        # Store quotient
         k = 0
         while k < block && q_pos + k < qn
           qp[q_pos + k] = q_block[k]
           k += 1
         end
 
-        # Replace the dividend portion with the remainder
         k = 0
         while k < block
           rem[q_pos + k] = r_block[k]
           k += 1
         end
-        # Zero out the higher part that was divided
         k = block
         while k < above
           rem[q_pos + k] = 0_u64
@@ -2816,102 +2798,68 @@ module BigNumber
         j -= 1
       end
 
-      # Copy final remainder
       rp.copy_from(rem, dn)
     end
 
     # Core B-Z: divide A[0..2n-1] by B[0..n-1].
-    # Precondition: A < B * β^n (quotient fits in n limbs).
-    # Stores quotient in qp[0..n-1], remainder in rp[0..n-1].
     protected def self.bz_div_2n_by_n(qp : Pointer(Limb), rp : Pointer(Limb),
-                                       ap : Pointer(Limb), bp : Pointer(Limb), n : Int32)
+                                       ap : Pointer(Limb), bp : Pointer(Limb), n : Int32,
+                                       arena : LimbArena)
       if n < 60
-        scratch = Pointer(Limb).malloc(3 * n + 2)
+        scratch = arena.alloc(3 * n + 2)
         limbs_div_rem(qp, rp, ap, 2 * n, bp, n, scratch)
         return
       end
 
       k = (n + 1) >> 1 # ceil(n/2)
 
-      # A = A3*β^(3k) + A2*β^(2k) + A1*β^k + A0
-      # B = B1*β^k + B0
-
-      # First half: divide A[k..2n-1] by B → Q1, R1
-      # A[k..2n-1] has 2n-k limbs. Pad to n+k for div_3_by_2.
-      a_hi = Pointer(Limb).malloc(n + k)
+      a_hi = arena.alloc(n + k)
       a_hi_actual = 2 * n - k
       a_hi.copy_from(ap + k, a_hi_actual)
-      i = a_hi_actual
-      while i < n + k
-        a_hi[i] = 0_u64
-        i += 1
-      end
 
-      r1 = Pointer(Limb).malloc(n + 1)
-      bz_div_3n_by_2n(qp + k, r1, a_hi, bp, n, k)
+      r1 = arena.alloc(n + 1)
+      bz_div_3n_by_2n(qp + k, r1, a_hi, bp, n, k, arena)
 
-      # Second half: divide [R1*β^k + A0] by B → Q0, R0
-      # Build: low k limbs = A[0..k-1], high n limbs = R1
-      a_lo = Pointer(Limb).malloc(n + k)
-      a_lo.copy_from(ap, k) # A0
-      (a_lo + k).copy_from(r1, n) # R1
-      # Zero-pad to n+k limbs (already at n+k)
+      a_lo = arena.alloc(n + k)
+      a_lo.copy_from(ap, k)
+      (a_lo + k).copy_from(r1, n)
 
-      bz_div_3n_by_2n(qp, rp, a_lo, bp, n, k)
+      bz_div_3n_by_2n(qp, rp, a_lo, bp, n, k, arena)
     end
 
     # Divide A[0..n+k-1] by B[0..n-1] where k = block size.
-    # Precondition: A < B * β^k.
-    # Stores quotient in qp[0..k-1], remainder in rp[0..n-1].
     protected def self.bz_div_3n_by_2n(qp : Pointer(Limb), rp : Pointer(Limb),
                                         ap : Pointer(Limb), bp : Pointer(Limb),
-                                        n : Int32, k : Int32)
-      b1n = n - k # size of B1 (high part of B)
+                                        n : Int32, k : Int32, arena : LimbArena)
+      b1n = n - k
 
-      # Step 1: Divide A[k..n+k-1] (n limbs) by B[k..n-1] (b1n limbs)
-      # This gives Q̂ (quotient estimate) and R1 (remainder)
-      a_top = ap + k    # n limbs
-      b1 = bp + k       # b1n limbs
+      a_top = ap + k
+      b1 = bp + k
 
-      # Handle division: a_top (n limbs) by b1 (b1n limbs)
-      # Quotient has at most n - b1n + 1 = k + 1 limbs
       if b1n == 0
-        # B1 is empty (shouldn't happen with proper n >= 2)
         qp.copy_from(a_top, k)
         rp.copy_from(ap, n)
         return
       end
 
-      # Normalize: check if a_top >= b1 (it should for the division to proceed)
-      # Pad a_top to 2*b1n limbs for div_2n_by_n
-      pad_n = Math.max(b1n, k + 1) # ensure enough room for quotient
-      if pad_n < b1n
-        pad_n = b1n
-      end
-      # Make pad_n = max(b1n, k+1) for the quotient, but dividend needs 2*pad_n limbs
-      # Actually, we just need to divide n limbs by b1n limbs.
-      # Use Algorithm D or recursive B-Z.
       q_hat_cap = k + 1
-      q_hat = Pointer(Limb).malloc(q_hat_cap)
-      r1 = Pointer(Limb).malloc(b1n + 1)
+      q_hat = arena.alloc(q_hat_cap)
+      r1 = arena.alloc(b1n + 1)
 
-      # For the recursive division, we need a_top (n limbs) / b1 (b1n limbs)
       if b1n < 60
-        scratch = Pointer(Limb).malloc(n + b1n + 2)
+        scratch = arena.alloc(n + b1n + 2)
         limbs_div_rem(q_hat, r1, a_top, n, b1, b1n, scratch)
       else
-        limbs_div_rem_bz(q_hat, r1, a_top, n, b1, b1n)
+        limbs_div_rem_bz_inner(q_hat, r1, a_top, n, b1, b1n, arena)
       end
 
-      # Normalize q_hat size
       q_hat_n = q_hat_cap
       while q_hat_n > 0 && q_hat[q_hat_n - 1] == 0
         q_hat_n -= 1
       end
 
-      # Step 2: D = Q̂ * B0
-      b0 = bp # k limbs
-      d = Pointer(Limb).malloc(q_hat_n + k + 1)
+      b0 = bp
+      d = arena.alloc(q_hat_n + k + 1)
       d_n = 0
       if q_hat_n > 0 && k > 0
         if q_hat_n >= k
@@ -2925,35 +2873,25 @@ module BigNumber
         end
       end
 
-      # Step 3: R = R1*β^k + A0 - D
-      # R1 has b1n limbs, but we need it in rp with n total limbs
-      # rp[0..k-1] = A0, rp[k..n-1] = R1[0..b1n-1]
-      rp.copy_from(ap, k) # A0 (low k limbs)
+      rp.copy_from(ap, k)
       i = 0
       while i < b1n && k + i < n
         rp[k + i] = r1[i]
         i += 1
       end
-      # Zero remaining
       while k + i < n
         rp[k + i] = 0_u64
         i += 1
       end
 
-      # Subtract D from rp
       if d_n > 0
-        sub_len = Math.max(n, d_n)
-        # Ensure rp is large enough (it has n limbs)
         if d_n <= n
           borrow = limbs_sub(rp, rp, n, d, d_n)
         else
-          # D is larger than R — this means Q̂ is too large
           borrow = 1_u64
         end
 
-        # Add-back loop: if borrow, Q̂ was too large
         while borrow > 0
-          # Q̂ -= 1
           if q_hat_n > 0
             i = 0
             b = 1_u64
@@ -2964,19 +2902,16 @@ module BigNumber
               i += 1
             end
           end
-          # R += B
           carry = limbs_add(rp, rp, n, bp, n)
           borrow = borrow > carry ? borrow - carry : 0_u64
         end
       end
 
-      # Recalculate q_hat_n after potential decrements
       q_hat_n = q_hat_cap
       while q_hat_n > 0 && q_hat[q_hat_n - 1] == 0
         q_hat_n -= 1
       end
 
-      # Copy q_hat to qp (k limbs)
       i = 0
       while i < k
         qp[i] = i < q_hat_n ? q_hat[i] : 0_u64
@@ -2984,7 +2919,7 @@ module BigNumber
       end
     end
 
-    # Returns {chunk_size, base^chunk_size} for string parsing.
+# Returns {chunk_size, base^chunk_size} for string parsing.
     # chunk_size is the largest k such that base^k fits in UInt64.
     protected def self.chunk_params(base : Int32) : {Int32, UInt64}
       # Precomputed for common bases
