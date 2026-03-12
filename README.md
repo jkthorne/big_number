@@ -9,10 +9,11 @@ A clean-room implementation of `BigInt`, `BigRational`, and `BigFloat` built ent
 **BigInt** -- Arbitrary-precision integers with sign-magnitude representation using 64-bit limbs.
 
 - Full arithmetic: `+`, `-`, `*`, `//`, `%`, `divmod`, `**`
-- Adaptive multiplication: schoolbook, Karatsuba (32+ limbs), and Toom-Cook 3-way (90+ limbs)
-- Knuth Algorithm D division with single-limb fast paths
+- Adaptive multiplication: schoolbook, Karatsuba (48+ limbs), NTT (25,000+ limbs)
+- Division: Knuth Algorithm D (small), Burnikel-Ziegler (80+ limbs)
+- ARM64 inline assembly for inner loops with UInt128 fallback
 - Bitwise operations with two's complement semantics: `&`, `|`, `^`, `~`, `<<`, `>>`
-- Number theory: `gcd`, `lcm`, `prime?` (Miller-Rabin), `pow_mod`, `sqrt`, `root(n)`, `factorial`
+- Number theory: `gcd` (binary), `lcm`, `prime?` (Miller-Rabin), `pow_mod` (Montgomery), `sqrt`, `root(n)`, `factorial`
 - Divide-and-conquer base conversion for fast `to_s` on large numbers
 - Binary import/export: `to_bytes`, `from_bytes`
 - Full set of checked conversions: `to_i8` through `to_u128`, `to_f64`
@@ -111,43 +112,46 @@ puts 0.5.to_big_r
 
 | Algorithm | Operation | Complexity | Threshold |
 |---|---|---|---|
-| Schoolbook | Multiplication | O(n*m) | < 32 limbs |
-| Karatsuba | Multiplication | O(n^1.585) | 32--90 limbs |
-| Toom-Cook 3-way | Multiplication | O(n^1.465) | > 90 limbs |
-| Knuth Algorithm D | Division | O(n^2) | All sizes |
+| Schoolbook | Multiplication | O(n*m) | < 48 limbs |
+| Karatsuba | Multiplication | O(n^1.585) | 48--24,999 limbs |
+| NTT (Goldilocks prime) | Multiplication | O(n log n) | >= 25,000 limbs |
+| Knuth Algorithm D | Division | O(n^2) | < 80 limbs |
+| Burnikel-Ziegler | Division | O(n^1.585) | >= 80 limbs |
 | Divide-and-conquer | Base conversion (`to_s`) | O(n*log^2 n) | > 50 limbs |
 | Newton's method | `sqrt`, `root(n)` | Quadratic convergence | All sizes |
 | Miller-Rabin | Primality testing | Deterministic to 3.3e24 | All sizes |
+| Montgomery REDC | `pow_mod` (odd moduli) | O(n^2 * log exp) | >= 2 limbs |
 | Binary exponentiation | `**`, `pow_mod` | O(log exp) | All sizes |
-| Euclidean | `gcd` | O(n) | All sizes |
+| Binary GCD (Stein's) | `gcd` | O(n^2) | All sizes |
 
 ## Performance
 
 Compared against Crystal's stdlib `BigInt` (which wraps libgmp). Ratios show BigNumber time relative to stdlib -- lower is better, and values under 1.0x mean BigNumber is faster.
 
-> **Last updated:** 2026-03-10 | Crystal 1.19.1 | Apple M-series | `crystal run bench/sanity.cr --release`
+> **Last updated:** 2026-03-12 | Crystal 1.19.1 | Apple M-series | `crystal run bench/sanity.cr --release`
 
 ### BigInt
 
 | Operation | 1 limb (19 dig) | 10 limbs (190 dig) | 50 limbs (950 dig) | 100 limbs (1.9k dig) | 1000 limbs (19k dig) |
 |-----------|:---:|:---:|:---:|:---:|:---:|
-| **add** | **0.71x** | 1.01x | 1.23x | 1.19x | 1.35x |
-| **mul** | **0.73x** | 1.45x | 3.09x | 5.02x | 5.59x |
-| **div** | **0.99x** | 2.67x | 2.68x | 3.15x | -- |
-| **to_s** | 2.70x | 3.37x | 5.32x | 5.87x | 5.98x |
+| **add** | **0.77x** | **0.98x** | 1.12x | 1.09x | 1.18x |
+| **mul** | **0.77x** | 1.35x | 2.62x | 2.62x | 3.21x |
+| **div** | **0.98x** | 2.54x | 2.36x | 2.62x | -- |
+| **to_s** | 1.95x | 3.36x | 5.16x | 5.37x | 4.58x |
 
 **Key takeaways:**
 - Single-limb arithmetic (numbers up to ~19 digits) is **faster than GMP** -- no FFI overhead
-- Addition stays within 1.0-1.4x across all sizes
-- Multiplication is competitive at small sizes; gap widens at 100+ limbs (no FFT yet)
-- `to_s` base conversion is the widest gap -- GMP uses a highly optimized recursive algorithm
+- Addition stays within 1.0-1.2x across all sizes (ARM64 inline asm)
+- Multiplication within 2-3x up to 100 limbs; NTT kicks in at 25k+ limbs
+- Division within 2-3x via Burnikel-Ziegler with arena allocator
+- `to_s` base conversion is the widest gap -- limited by division performance
 
 ### BigRational
 
 | Operation | 5 digits | 50 digits | 200 digits |
 |-----------|:---:|:---:|:---:|
-| **add** | 1.36x | 1.30x | 1.29x |
-| **mul** | 1.34x | 1.27x | 1.29x |
+| **add** | 1.10x | 1.10x | 1.09x |
+| **mul** | 1.16x | 1.17x | 1.16x |
 | **div** | fastest | fastest | fastest |
 
 ### Reproducing
