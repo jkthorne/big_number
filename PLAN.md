@@ -139,51 +139,32 @@ We do not read, copy, or translate GMP or mini-gmp source code.
 - GMP manual (algorithm descriptions, not source)
 - Wikipedia: Karatsuba, Toom-Cook, Burnikel-Ziegler, NTT, Montgomery
 
-## What Was Built
+## Development History
 
-### Phase 1: Core Arithmetic
-
-BigInt with all standard operations: `+`, `-`, `*`, `//`, `%`, `divmod`,
-`**`, `pow_mod`, `gcd`, `lcm`, `sqrt`, `root(n)`, `factorial`, `prime?`,
-bitwise ops (`&`, `|`, `^`, `~`, `<<`, `>>`), comparison, string conversion
-(bases 2–36), `to_f64`, `to_i64`.
-
-### Phase 2: Additional Types
-
-- **BigRational**: exact p/q arithmetic, auto-canonicalized via binary GCD
-- **BigFloat**: arbitrary precision (configurable, default 128 bits),
-  Newton's method for sqrt/div
-- **BigDecimal**: fixed-scale decimal, ported from Crystal stdlib (592 lines)
-
-### Phase 3: Performance
-
-Allocation reduction in hot paths. Binary GCD for BigRational. Karatsuba
-threshold tuned to 48 (from 32). Single-limb `to_s` fast path. D&C `to_s`
-with cached power tables and raw limb recursion. Branch-free `limbs_submul_1`.
-
-### Phase 4: Stdlib Drop-In
-
-`require "big_number/stdlib"` replaces `require "big"` with zero behavioral
-changes. Wrapper structs (`BigInt < Int`, `BigFloat < Float`, etc.) with
-single `@inner` field — LLVM optimizes away the indirection. Primitive
-extensions (`to_big_i`, `to_big_f`), Math module, Random, numeric hash
-equality, JSON/YAML serialization.
-
-### Phase 5: Advanced Optimizations
-
-- **ARM64 inline assembly** for 6 inner-loop functions (1.4–1.6x per function)
-- **LimbArena bump allocator** for Burnikel-Ziegler (eliminates per-level malloc)
-- **Montgomery REDC** for `pow_mod` with odd moduli
-- **NTT multiplication** (Goldilocks prime, 32-bit splitting) for >= 25k limbs
+1. **Core arithmetic** — BigInt with full operator set, string conversion,
+   number theory (`gcd`, `prime?`, `pow_mod`, `sqrt`, `factorial`)
+2. **Additional types** — BigRational (binary GCD), BigFloat (Newton's method),
+   BigDecimal (ported from stdlib)
+3. **Performance** — allocation reduction, threshold tuning (Karatsuba 48,
+   Toom-3 disabled), D&C `to_s` with cached powers, branch-free inner loops
+4. **Stdlib drop-in** — wrapper structs, primitive extensions, Math/Random,
+   numeric hash equality, JSON/YAML serialization
+5. **Advanced optimizations** — ARM64 inline asm (6 functions, 1.4–1.6x each),
+   LimbArena for Burnikel-Ziegler, Montgomery REDC, NTT multiplication
 
 ## Future Work
 
-Performance improvements that would close the remaining gap to GMP:
+### Performance — Closing the GMP Gap
+
+| Area | Current gap | Approach | Expected impact |
+|------|-------------|----------|-----------------|
+| **Mul (large)** | 2.6–3.2x | x86-64 inline asm + 4x loop unrolling | ~1.5x improvement |
+| **Div (large)** | 2.4–2.6x | x86-64 asm for `submul_1`/`addmul_1` | ~1.3x improvement |
+| **to_s** | 3.4–5.6x | Subquadratic base conversion (scaled remainder trees) | ~2x improvement |
+| **NTT** | Untested vs GMP | Goldilocks mulmod fast path (no u128 division) | Better constant factor |
+
+### Features
 
 - **x86-64 inline assembly** — `mul`/`adc`/`sbb` equivalents of the ARM64 paths
-- **Loop unrolling** — 4x unroll in asm inner loops for better instruction pipelining
-- **Faster base conversion** — the `to_s` gap (3–6x) is bottlenecked by division;
-  a subquadratic approach (e.g., scaled remainder trees) could help at large sizes
-- **Goldilocks mulmod fast path** — eliminate u128 division in NTT reduction
-- **Barrett reduction** — for repeated mod with same modulus (useful in crypto)
+- **Barrett reduction** — for repeated modular reduction with same modulus
 - **Shard publication** — publish to shards.info for public consumption
