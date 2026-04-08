@@ -1634,4 +1634,13 @@ struct BigRational
   Number.expand_div [Float32, Float64], BigRational
 end
 
+# Allow BigNumber::BigInt.new to accept the stdlib wrapper BigInt.
+module BigNumber
+  struct BigInt
+    def initialize(wrapper : ::BigInt)
+      initialize(wrapper.inner)
+    end
+  end
+end
+
 require "./stdlib_ext"
